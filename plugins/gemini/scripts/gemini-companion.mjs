@@ -145,7 +145,7 @@ function handleAsk(argv) {
 
   // Background mode
   if (options.background) {
-    const workspaceRoot = cwd;
+    const workspaceRoot = resolveWorkspaceRoot(cwd);
     const job = createJob({ kind: "ask", command: "ask", prompt, workspaceRoot, cwd });
     const bgArgs = ["ask", prompt];
     if (options.model) bgArgs.push("--model", options.model);
@@ -196,7 +196,7 @@ function handleReview(argv) {
 
   // Background mode
   if (options.background) {
-    const workspaceRoot = cwd;
+    const workspaceRoot = resolveWorkspaceRoot(cwd);
     const job = createJob({ kind: "review", command: "review", prompt: "code review", workspaceRoot, cwd });
     const bgArgs = ["review"];
     if (options.base) bgArgs.push("--base", options.base);
@@ -270,10 +270,11 @@ function handleStatus(argv) {
   });
 
   const cwd = resolveCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const reference = positionals[0] || null;
 
   if (reference) {
-    const snapshot = buildSingleJobSnapshot(cwd, reference);
+    const snapshot = buildSingleJobSnapshot(workspaceRoot, reference);
     if (!snapshot) {
       outputResult(
         options.json ? { error: "Job not found" } : `Job \`${reference}\` not found.\n`,
@@ -289,7 +290,7 @@ function handleStatus(argv) {
     return;
   }
 
-  const snapshot = buildStatusSnapshot(cwd);
+  const snapshot = buildStatusSnapshot(workspaceRoot, { showAll: options.all });
   outputResult(
     options.json ? snapshot : renderStatusReport(snapshot),
     options.json
@@ -305,8 +306,9 @@ function handleResult(argv) {
   });
 
   const cwd = resolveCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const reference = positionals[0] || null;
-  const job = resolveResultJob(cwd, reference);
+  const job = resolveResultJob(workspaceRoot, reference);
 
   if (!job) {
     outputResult(
@@ -319,8 +321,8 @@ function handleResult(argv) {
     return;
   }
 
-  const result = readStoredJobResult(cwd, job.id);
-  const enriched = buildSingleJobSnapshot(cwd, job.id) || job;
+  const result = readStoredJobResult(workspaceRoot, job.id);
+  const enriched = buildSingleJobSnapshot(workspaceRoot, job.id) || job;
 
   outputResult(
     options.json
@@ -339,8 +341,9 @@ function handleCancel(argv) {
   });
 
   const cwd = resolveCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const reference = positionals[0] || null;
-  const job = resolveCancelableJob(cwd, reference);
+  const job = resolveCancelableJob(workspaceRoot, reference);
 
   if (!job) {
     outputResult(
@@ -353,7 +356,7 @@ function handleCancel(argv) {
     return;
   }
 
-  const report = cancelJob(cwd, job.id);
+  const report = cancelJob(workspaceRoot, job.id);
   outputResult(
     options.json ? report : renderCancelReport(report),
     options.json

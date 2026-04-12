@@ -237,11 +237,12 @@ export function formatElapsedDuration(startMs, endMs) {
 
 // ── Status snapshots ─────────────────────────────────────
 
-export function buildStatusSnapshot(workspaceRoot) {
+export function buildStatusSnapshot(workspaceRoot, { showAll = false } = {}) {
   const jobs = listJobs(workspaceRoot);
   const sorted = sortJobsNewestFirst(jobs);
+  const limit = showAll ? sorted.length : DEFAULT_MAX_STATUS_JOBS;
   const enriched = sorted
-    .slice(0, DEFAULT_MAX_STATUS_JOBS)
+    .slice(0, limit)
     .map((j) => enrichJob(j, workspaceRoot));
 
   const running = enriched.filter((j) => j.status === "running" || j.status === "queued");

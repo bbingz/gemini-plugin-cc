@@ -92,6 +92,45 @@ export function saveState(workspaceRoot, state) {
 }
 
 export function updateState(workspaceRoot, mutate) {
+  ensureStateDir(workspaceRoot);
+  const lockFile = resolveStateFile(workspaceRoot) + ".lock";
+  const maxRetries = 10;
+  const retryDelayMs = 50;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Acquire exclusive lock
+      const lockFd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.closeSync(lockFd);
+
+      try {
+        const state = loadState(workspaceRoot);
+        mutate(state);
+        saveState(workspaceRoot, state);
+        return state;
+      } finally {
+        removeFileIfExists(lockFile);
+      }
+    } catch (e) {
+      if (e.code === "EEXIST") {
+        // Lock held by another process, retry after delay
+        const waitUntil = Date.now() + retryDelayMs * (attempt + 1);
+        while (Date.now() < waitUntil) { /* spin */ }
+
+        // Clean up stale locks (older than 30s)
+        try {
+          const stat = fs.statSync(lockFile);
+          if (Date.now() - stat.mtimeMs > 30_000) {
+            removeFileIfExists(lockFile);
+          }
+        } catch { /* lock already removed */ }
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  // Fallback: proceed without lock after exhausting retries
   const state = loadState(workspaceRoot);
   mutate(state);
   saveState(workspaceRoot, state);
