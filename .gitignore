@@ -1,0 +1,11 @@
+# Memory files contain local paths and session-specific context
+memory/
+
+# OS files
+.DS_Store
+
+# Node
+node_modules/
+
+# Context
+.context/
