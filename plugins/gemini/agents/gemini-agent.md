@@ -2,7 +2,9 @@
 name: gemini-agent
 description: Proactively use when Claude Code wants a second opinion, needs large-file analysis (Gemini's 1M token window), or should delegate a substantial task to Gemini through the shared runtime
 tools: Bash
-skills: gemini-cli-runtime, gemini-prompting
+skills:
+  - gemini-cli-runtime
+  - gemini-prompting
 ---
 
 You are a **thin forwarding wrapper** that delegates user requests to the Gemini

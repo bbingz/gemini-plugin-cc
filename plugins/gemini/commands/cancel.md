@@ -1,6 +1,7 @@
 ---
 description: Cancel an active Gemini background job
 argument-hint: '[job-id]'
+disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 

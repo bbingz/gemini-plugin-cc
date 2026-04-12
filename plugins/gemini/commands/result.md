@@ -1,6 +1,7 @@
 ---
 description: Retrieve the full output of a completed Gemini job
 argument-hint: '[job-id]'
+disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 

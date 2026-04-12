@@ -1,6 +1,7 @@
 ---
 description: Show active and recent Gemini background jobs
 argument-hint: '[job-id] [--all]'
+disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 
