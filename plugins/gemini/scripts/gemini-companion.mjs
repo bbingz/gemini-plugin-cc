@@ -7,11 +7,31 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "./lib/args.mjs";
 import { callGemini, getGeminiAvailability, getGeminiAuthStatus } from "./lib/gemini.mjs";
 import { ensureGitRepository, getDiff, detectBaseBranch } from "./lib/git.mjs";
+import {
+  buildStatusSnapshot,
+  buildSingleJobSnapshot,
+  cancelJob,
+  createJob,
+  readStoredJobResult,
+  resolveCancelableJob,
+  resolveResultJob,
+  runJobInBackground,
+  runWorker,
+} from "./lib/job-control.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
-import { renderSetupReport, renderGeminiResult, renderReviewResult } from "./lib/render.mjs";
+import {
+  renderSetupReport,
+  renderGeminiResult,
+  renderReviewResult,
+  renderJobSubmitted,
+  renderStatusReport,
+  renderStoredJobResult,
+  renderCancelReport,
+} from "./lib/render.mjs";
 import { getConfig, setConfig } from "./lib/state.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const SELF = fileURLToPath(import.meta.url);
 const MAX_DIFF_LENGTH = 200_000; // ~50K tokens
 
 // ── Helpers ──────────────────────────────────────────────
@@ -21,8 +41,11 @@ function printUsage() {
     [
       "Usage:",
       "  gemini-companion.mjs setup [--json]",
-      "  gemini-companion.mjs ask [--model <model>] [--approval-mode <mode>] [--json] <prompt>",
-      "  gemini-companion.mjs review [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json]",
+      "  gemini-companion.mjs ask [--model <model>] [--approval-mode <mode>] [--background|--wait] [--json] <prompt>",
+      "  gemini-companion.mjs review [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--background|--wait] [--json]",
+      "  gemini-companion.mjs status [job-id] [--all] [--json]",
+      "  gemini-companion.mjs result [job-id] [--json]",
+      "  gemini-companion.mjs cancel [job-id] [--json]",
     ].join("\n")
   );
 }
@@ -35,8 +58,14 @@ function outputResult(value, asJson) {
   }
 }
 
-function parseCommandInput(argv, config = {}) {
-  return parseArgs(argv, config);
+import { runCommand } from "./lib/process.mjs";
+
+function resolveWorkspaceRoot(cwd) {
+  const result = runCommand("git", ["rev-parse", "--show-toplevel"], { cwd });
+  if (result.status === 0 && result.stdout.trim()) {
+    return result.stdout.trim();
+  }
+  return cwd;
 }
 
 function resolveCwd(options) {
@@ -46,7 +75,7 @@ function resolveCwd(options) {
 // ── Setup ────────────────────────────────────────────────
 
 function handleSetup(argv) {
-  const { options } = parseCommandInput(argv, {
+  const { options } = parseArgs(argv, {
     booleanOptions: ["json"],
     valueOptions: ["cwd"],
   });
@@ -61,8 +90,6 @@ function buildSetupReport(cwd) {
   const npmStatus = binaryAvailable("npm", ["--version"], { cwd });
   const geminiStatus = getGeminiAvailability(cwd);
 
-  const nextSteps = [];
-
   if (!geminiStatus.available) {
     return {
       ready: false,
@@ -76,6 +103,7 @@ function buildSetupReport(cwd) {
   }
 
   const authStatus = getGeminiAuthStatus(cwd);
+  const nextSteps = [];
 
   if (!authStatus.loggedIn) {
     nextSteps.push("Run `! gemini` in an interactive terminal to authenticate.");
@@ -95,8 +123,8 @@ function buildSetupReport(cwd) {
 // ── Ask ──────────────────────────────────────────────────
 
 function handleAsk(argv) {
-  const { options, positionals } = parseCommandInput(argv, {
-    booleanOptions: ["json"],
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json", "background", "wait"],
     valueOptions: ["model", "approval-mode", "cwd"],
     aliasMap: { m: "model" },
   });
@@ -114,6 +142,23 @@ function handleAsk(argv) {
   }
 
   const cwd = resolveCwd(options);
+
+  // Background mode
+  if (options.background) {
+    const workspaceRoot = cwd;
+    const job = createJob({ kind: "ask", command: "ask", prompt, workspaceRoot, cwd });
+    const bgArgs = ["ask", prompt];
+    if (options.model) bgArgs.push("--model", options.model);
+    if (options["approval-mode"]) bgArgs.push("--approval-mode", options["approval-mode"]);
+
+    const submission = runJobInBackground({ job, companionScript: SELF, args: bgArgs, workspaceRoot, cwd });
+    outputResult(
+      options.json ? submission : renderJobSubmitted(submission),
+      options.json
+    );
+    return;
+  }
+
   const result = callGemini({
     prompt,
     model: options.model || null,
@@ -131,8 +176,8 @@ function handleAsk(argv) {
 // ── Review ───────────────────────────────────────────────
 
 function handleReview(argv) {
-  const { options, positionals } = parseCommandInput(argv, {
-    booleanOptions: ["json"],
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json", "background", "wait"],
     valueOptions: ["base", "scope", "model", "cwd"],
   });
 
@@ -142,12 +187,28 @@ function handleReview(argv) {
     ensureGitRepository(cwd);
   } catch (e) {
     outputResult(
-      options.json
-        ? { ok: false, error: e.message }
-        : `Error: ${e.message}\n`,
+      options.json ? { ok: false, error: e.message } : `Error: ${e.message}\n`,
       options.json
     );
     process.exitCode = 1;
+    return;
+  }
+
+  // Background mode
+  if (options.background) {
+    const workspaceRoot = cwd;
+    const job = createJob({ kind: "review", command: "review", prompt: "code review", workspaceRoot, cwd });
+    const bgArgs = ["review"];
+    if (options.base) bgArgs.push("--base", options.base);
+    if (options.scope) bgArgs.push("--scope", options.scope);
+    if (options.model) bgArgs.push("--model", options.model);
+    positionals.forEach((p) => bgArgs.push(p));
+
+    const submission = runJobInBackground({ job, companionScript: SELF, args: bgArgs, workspaceRoot, cwd });
+    outputResult(
+      options.json ? submission : renderJobSubmitted(submission),
+      options.json
+    );
     return;
   }
 
@@ -171,7 +232,6 @@ function handleReview(argv) {
     truncated = true;
   }
 
-  // Extra context from positionals (e.g. "focus on security")
   const focusText = positionals.join(" ").trim();
   const focusLine = focusText ? `\nFocus area: ${focusText}\n` : "";
 
@@ -201,6 +261,105 @@ ${diffText}
   if (!result.ok) process.exitCode = 1;
 }
 
+// ── Status ───────────────────────────────────────────────
+
+function handleStatus(argv) {
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json", "all"],
+    valueOptions: ["cwd"],
+  });
+
+  const cwd = resolveCwd(options);
+  const reference = positionals[0] || null;
+
+  if (reference) {
+    const snapshot = buildSingleJobSnapshot(cwd, reference);
+    if (!snapshot) {
+      outputResult(
+        options.json ? { error: "Job not found" } : `Job \`${reference}\` not found.\n`,
+        options.json
+      );
+      process.exitCode = 1;
+      return;
+    }
+    outputResult(
+      options.json ? snapshot : renderStatusReport({ totalJobs: 1, running: snapshot.status === "running" ? [snapshot] : [], recent: snapshot.status !== "running" ? [snapshot] : [] }),
+      options.json
+    );
+    return;
+  }
+
+  const snapshot = buildStatusSnapshot(cwd);
+  outputResult(
+    options.json ? snapshot : renderStatusReport(snapshot),
+    options.json
+  );
+}
+
+// ── Result ───────────────────────────────────────────────
+
+function handleResult(argv) {
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json"],
+    valueOptions: ["cwd"],
+  });
+
+  const cwd = resolveCwd(options);
+  const reference = positionals[0] || null;
+  const job = resolveResultJob(cwd, reference);
+
+  if (!job) {
+    outputResult(
+      options.json
+        ? { error: "No completed job found" }
+        : "No completed job found. Run `/gemini:status` to see all jobs.\n",
+      options.json
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = readStoredJobResult(cwd, job.id);
+  const enriched = buildSingleJobSnapshot(cwd, job.id) || job;
+
+  outputResult(
+    options.json
+      ? { job: enriched, result }
+      : renderStoredJobResult(enriched, result),
+    options.json
+  );
+}
+
+// ── Cancel ───────────────────────────────────────────────
+
+function handleCancel(argv) {
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json"],
+    valueOptions: ["cwd"],
+  });
+
+  const cwd = resolveCwd(options);
+  const reference = positionals[0] || null;
+  const job = resolveCancelableJob(cwd, reference);
+
+  if (!job) {
+    outputResult(
+      options.json
+        ? { cancelled: false, reason: "No active job found" }
+        : "No active job found to cancel.\n",
+      options.json
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const report = cancelJob(cwd, job.id);
+  outputResult(
+    options.json ? report : renderCancelReport(report),
+    options.json
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────
 
 const argv = process.argv.slice(2);
@@ -217,6 +376,21 @@ switch (subcommand) {
   case "review":
     handleReview(subArgv);
     break;
+  case "status":
+    handleStatus(subArgv);
+    break;
+  case "result":
+    handleResult(subArgv);
+    break;
+  case "cancel":
+    handleCancel(subArgv);
+    break;
+  case "_worker": {
+    // Internal: background worker. Args: <jobId> <workspaceRoot> <command> [command-args...]
+    const [jobId, wsRoot, ...workerArgs] = subArgv;
+    runWorker(jobId, wsRoot, SELF, workerArgs);
+    break;
+  }
   default:
     if (subcommand) {
       console.error(`Unknown subcommand: ${subcommand}`);

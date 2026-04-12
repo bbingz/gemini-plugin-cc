@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["verdict", "summary", "findings", "next_steps"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "needs-attention"],
+      "description": "Overall review verdict"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-paragraph summary of the review"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "title", "body", "file", "line_start", "line_end", "confidence", "recommendation"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short title for the finding"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Detailed description of the issue"
+          },
+          "file": {
+            "type": "string",
+            "description": "File path relative to repo root"
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence score (0-1)"
+          },
+          "recommendation": {
+            "type": "string",
+            "description": "Suggested fix or action"
+          }
+        }
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Recommended next actions"
+    }
+  }
+}

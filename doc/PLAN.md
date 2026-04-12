@@ -353,6 +353,9 @@ function getDiff({ base, scope, cwd }) {
 - [ ] `skills/gemini-result-handling/SKILL.md`
 - [ ] `skills/gemini-prompting/SKILL.md`
 
+### Bug 修复
+- [ ] **diff 收集阶段早期截断** — 大 repo 中 untracked files 太多导致 Node.js 字符串溢出。需要在 `getUntrackedFilesDiff` 和 `getLocalModifications` 中加入文件数/总大小限制，而不只是在发送给 Gemini 时截断。(v1 实测发现：DrCom repo review 失败)
+
 ### 高级功能
 - [ ] `schemas/review-output.schema.json` — 结构化审查输出
 - [ ] **adversarial-review 命令** — 对抗性安全审查

@@ -1,0 +1,356 @@
+import fs from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import process from "node:process";
+
+import {
+  ensureStateDir,
+  generateJobId,
+  listJobs,
+  readJobFile,
+  resolveJobFile,
+  resolveJobLogFile,
+  upsertJob,
+  writeJobFile,
+} from "./state.mjs";
+
+// ── Constants ────────────────────────────────────────────
+
+export const SESSION_ID_ENV = "GEMINI_COMPANION_SESSION_ID";
+const DEFAULT_MAX_STATUS_JOBS = 8;
+const DEFAULT_MAX_PROGRESS_LINES = 4;
+
+// ── Job creation ─────────────────────────────────────────
+
+export function createJob({ kind, command, prompt, workspaceRoot, cwd }) {
+  const id = generateJobId(kind === "review" ? "gr" : "ga");
+  const sessionId = process.env[SESSION_ID_ENV] || null;
+  const now = new Date().toISOString();
+
+  const job = {
+    id,
+    kind,
+    command,
+    prompt: prompt?.slice(0, 200),
+    status: "queued",
+    pid: null,
+    sessionId,
+    createdAt: now,
+    updatedAt: now,
+    cwd,
+  };
+
+  upsertJob(workspaceRoot, job);
+  return job;
+}
+
+// ── Background execution ─────────────────────────────────
+
+/**
+ * Run a job in background via a worker subprocess.
+ *
+ * The worker runs the actual command, captures the result, and updates
+ * job state on completion. We can't rely on child.on("exit") because
+ * the parent unref()'s immediately.
+ */
+export function runJobInBackground({
+  job,
+  companionScript,
+  args,
+  workspaceRoot,
+  cwd,
+}) {
+  ensureStateDir(workspaceRoot);
+
+  const logFile = resolveJobLogFile(workspaceRoot, job.id);
+  const logFd = fs.openSync(logFile, "w");
+
+  fs.writeSync(logFd, `[${new Date().toISOString()}] Job ${job.id} started\n`);
+  fs.writeSync(logFd, `[${new Date().toISOString()}] Command: ${args.join(" ")}\n\n`);
+
+  // Spawn a worker that runs the command and writes the result back
+  const child = spawn("node", [companionScript, "_worker", job.id, workspaceRoot, ...args], {
+    cwd,
+    stdio: ["ignore", logFd, logFd],
+    detached: true,
+    env: { ...process.env },
+  });
+
+  child.unref();
+  fs.closeSync(logFd);
+
+  upsertJob(workspaceRoot, {
+    id: job.id,
+    status: "running",
+    pid: child.pid,
+  });
+
+  return { jobId: job.id, pid: child.pid };
+}
+
+/**
+ * Worker entry point — called by the background subprocess.
+ * Runs the foreground command, captures JSON output, and persists result.
+ */
+export function runWorker(jobId, workspaceRoot, companionScript, args) {
+
+  // Run the actual command in foreground (within this subprocess)
+  const result = spawnSync("node", [companionScript, ...args, "--json"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    timeout: 600_000, // 10 min max
+    env: { ...process.env },
+  });
+
+  const now = new Date().toISOString();
+  const exitCode = result.status ?? 1;
+  const status = exitCode === 0 ? "completed" : "failed";
+
+  // Try to parse JSON from stdout
+  let parsedResult = null;
+  const stdout = result.stdout || "";
+  const jsonStart = stdout.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      parsedResult = JSON.parse(stdout.slice(jsonStart));
+    } catch {
+      // ignore
+    }
+  }
+
+  // Persist result
+  writeJobFile(workspaceRoot, jobId, {
+    id: jobId,
+    status,
+    exitCode,
+    result: parsedResult,
+    completedAt: now,
+  });
+
+  // Update job state
+  upsertJob(workspaceRoot, {
+    id: jobId,
+    status,
+    exitCode,
+    pid: null,
+  });
+
+  // Log completion
+  console.log(`\n[${now}] Job ${jobId} ${status} (exit ${exitCode})`);
+}
+
+// ── Job queries ──────────────────────────────────────────
+
+export function sortJobsNewestFirst(jobs) {
+  return jobs
+    .slice()
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+}
+
+export function getCurrentSessionId() {
+  return process.env[SESSION_ID_ENV] || null;
+}
+
+export function filterJobsForCurrentSession(jobs) {
+  const sessionId = getCurrentSessionId();
+  if (!sessionId) return jobs;
+  return jobs.filter((j) => j.sessionId === sessionId);
+}
+
+export function getJobKindLabel(job) {
+  if (job.kind === "review") return "review";
+  if (job.kind === "ask") return "ask";
+  return "job";
+}
+
+// ── Job status ───────────────────────────────────────────
+
+function isProcessAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function enrichJob(job, workspaceRoot) {
+  const enriched = { ...job };
+
+  // Check if running job is actually still alive
+  if (enriched.status === "running" && enriched.pid && !isProcessAlive(enriched.pid)) {
+    enriched.status = "failed";
+    enriched.detail = "Process exited unexpectedly";
+    upsertJob(workspaceRoot, { id: enriched.id, status: "failed", pid: null });
+  }
+
+  // Add elapsed time
+  if (enriched.createdAt) {
+    const start = new Date(enriched.createdAt).getTime();
+    const end = enriched.status === "running"
+      ? Date.now()
+      : new Date(enriched.updatedAt || enriched.createdAt).getTime();
+    enriched.elapsed = formatElapsedDuration(start, end);
+  }
+
+  // Add progress preview from log file
+  enriched.progressPreview = readJobProgressPreview(
+    resolveJobLogFile(workspaceRoot, enriched.id),
+    DEFAULT_MAX_PROGRESS_LINES
+  );
+
+  // Add kind label
+  enriched.kindLabel = getJobKindLabel(enriched);
+
+  return enriched;
+}
+
+function readJobProgressPreview(logFile, maxLines) {
+  try {
+    const content = fs.readFileSync(logFile, "utf8");
+    const lines = content.trim().split("\n");
+    // Take last N non-empty lines, strip timestamps
+    return lines
+      .filter((l) => l.trim())
+      .slice(-maxLines)
+      .map(stripLogPrefix)
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function stripLogPrefix(line) {
+  return line.replace(/^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z?\]\s*/, "");
+}
+
+export function formatElapsedDuration(startMs, endMs) {
+  const seconds = Math.round((endMs - startMs) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainSec = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainSec}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainMin = minutes % 60;
+  return `${hours}h ${remainMin}m`;
+}
+
+// ── Status snapshots ─────────────────────────────────────
+
+export function buildStatusSnapshot(workspaceRoot) {
+  const jobs = listJobs(workspaceRoot);
+  const sorted = sortJobsNewestFirst(jobs);
+  const enriched = sorted
+    .slice(0, DEFAULT_MAX_STATUS_JOBS)
+    .map((j) => enrichJob(j, workspaceRoot));
+
+  const running = enriched.filter((j) => j.status === "running" || j.status === "queued");
+  const recent = enriched.filter((j) => j.status !== "running" && j.status !== "queued");
+
+  return {
+    totalJobs: jobs.length,
+    running,
+    recent,
+  };
+}
+
+export function buildSingleJobSnapshot(workspaceRoot, jobId) {
+  const jobs = listJobs(workspaceRoot);
+  const job = jobs.find((j) => j.id === jobId);
+  if (!job) return null;
+  return enrichJob(job, workspaceRoot);
+}
+
+// ── Job resolution for result/cancel ─────────────────────
+
+export function resolveResultJob(workspaceRoot, reference) {
+  const jobs = listJobs(workspaceRoot);
+  const terminal = jobs.filter(
+    (j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled"
+  );
+  return matchJobReference(terminal, reference);
+}
+
+export function resolveCancelableJob(workspaceRoot, reference) {
+  const jobs = listJobs(workspaceRoot);
+  const active = jobs.filter(
+    (j) => j.status === "queued" || j.status === "running"
+  );
+  return matchJobReference(active, reference);
+}
+
+function matchJobReference(jobs, reference) {
+  if (!reference) {
+    // Return most recent
+    const sorted = sortJobsNewestFirst(jobs);
+    return sorted[0] || null;
+  }
+
+  // Exact match
+  const exact = jobs.find((j) => j.id === reference);
+  if (exact) return exact;
+
+  // Prefix match
+  const prefix = jobs.filter((j) => j.id.startsWith(reference));
+  if (prefix.length === 1) return prefix[0];
+
+  return null;
+}
+
+// ── Job cancellation ─────────────────────────────────────
+
+export function cancelJob(workspaceRoot, jobId) {
+  const jobs = listJobs(workspaceRoot);
+  const job = jobs.find((j) => j.id === jobId);
+  if (!job) return { cancelled: false, reason: "Job not found" };
+
+  if (job.status !== "running" && job.status !== "queued") {
+    return { cancelled: false, reason: `Job is ${job.status}, not cancellable` };
+  }
+
+  // Kill the process
+  if (job.pid) {
+    try {
+      // Try process group first
+      process.kill(-job.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(job.pid, "SIGTERM");
+      } catch {
+        // Process already gone
+      }
+    }
+  }
+
+  upsertJob(workspaceRoot, {
+    id: jobId,
+    status: "cancelled",
+    pid: null,
+  });
+
+  return { cancelled: true, jobId };
+}
+
+// ── Read stored job result ───────────────────────────────
+
+export function readStoredJobResult(workspaceRoot, jobId) {
+  const jobFile = resolveJobFile(workspaceRoot, jobId);
+  const data = readJobFile(jobFile);
+  if (data?.result) return data.result;
+
+  // Fall back to parsing log file
+  try {
+    const logContent = fs.readFileSync(
+      resolveJobLogFile(workspaceRoot, jobId),
+      "utf8"
+    );
+    const jsonStart = logContent.lastIndexOf("\n{");
+    if (jsonStart >= 0) {
+      return JSON.parse(logContent.slice(jsonStart + 1));
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}

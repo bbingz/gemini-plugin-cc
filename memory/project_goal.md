@@ -1,17 +1,22 @@
 ---
 name: Project Goal
-description: Gemini CLI plugin for Claude Code — goals, scope, v1/v2 split after Codex review
+description: Gemini CLI plugin for Claude Code — v1 shipped and verified working
 type: project
 ---
 
-Building a Claude Code plugin that integrates Google Gemini CLI as an on-demand subagent.
+Claude Code plugin integrating Google Gemini CLI as an on-demand subagent. **v1 shipped 2026-04-12.**
 
-**Why:** User wants to call Gemini for code review, task delegation, and second opinions without Gemini running as a persistent MCP server (which would waste context).
+**Status:** v1 complete, installed, and verified in live Claude Code session.
+- `/gemini:setup` — Ready (gemini-3.1-pro-preview, auth OK)
+- `/gemini:ask` — working (tested "What is 2+2?")
+- `/gemini:review` — working (tested on real git diffs)
 
-**How to apply:**
-- Plugin architecture informed by Codex plugin, but not blind 1:1 copy
-- v1 scope (after Codex review): foreground-only `setup/ask/review` — 3 commands
-- v2 scope: background tasks (status/result/cancel), agents, skills, adversarial review
-- Key simplification: Gemini CLI is direct `spawnSync`, no JSON-RPC/app-server needed
-- Implementation sequence: prove minimal command path first, then layer on complexity
-- Codex reviewed the plan (2026-04-12) — key feedback: reduce scope, verify CLI assumptions, fix error handling gaps. All addressed in revised plan.
+**Installation:** Local marketplace at `/Users/bing/-Code-/gemini-plugin-cc/`, installed via `claude plugin marketplace add` + `claude plugin install gemini`.
+
+**Architecture:** Companion script pattern (like Codex plugin). 1051 lines across 15 files. No external deps.
+
+**Reviews completed:**
+- Gemini self-review: 6 findings, 4 fixed (parseCommandInput, E2BIG, stderr parsing, auth detection)
+- Codex review: 3 findings, 3 fixed (auto scope misses working tree, silent main fallback, untracked files invisible)
+
+**Next:** v2 features — background tasks (status/result/cancel), agents, skills, adversarial review. See doc/PLAN.md "v2 TODO" section.
