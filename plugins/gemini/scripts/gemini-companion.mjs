@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs } from "./lib/args.mjs";
 import { callGemini, getGeminiAvailability, getGeminiAuthStatus } from "./lib/gemini.mjs";
-import { ensureGitRepository, getDiff, detectBaseBranch } from "./lib/git.mjs";
+import { ensureGitRepository, collectReviewContext } from "./lib/git.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   buildStatusSnapshot,
@@ -35,6 +36,15 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SELF = fileURLToPath(import.meta.url);
 const MAX_DIFF_LENGTH = 200_000; // ~50K tokens
 
+function loadReviewSchema() {
+  try {
+    const schemaPath = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
+    return fs.readFileSync(schemaPath, "utf8").trim();
+  } catch {
+    return null;
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────
 
 function printUsage() {
@@ -43,8 +53,8 @@ function printUsage() {
       "Usage:",
       "  gemini-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  gemini-companion.mjs ask [--model <model>] [--approval-mode <mode>] [--effort <low|medium|high>] [--background|--wait] [--json] <prompt>",
-      "  gemini-companion.mjs review [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--background|--wait] [--json]",
-      "  gemini-companion.mjs adversarial-review [--base <ref>] [--scope <auto|working-tree|branch>] [--background|--wait] [--json] [focus ...]",
+      "  gemini-companion.mjs review [--base <ref>] [--scope <auto|working-tree|staged|unstaged|branch>] [--model <model>] [--background|--wait] [--json]",
+      "  gemini-companion.mjs adversarial-review [--base <ref>] [--scope <auto|working-tree|staged|unstaged|branch>] [--background|--wait] [--json] [focus ...]",
       "  gemini-companion.mjs status [job-id] [--all] [--json]",
       "  gemini-companion.mjs result [job-id] [--json]",
       "  gemini-companion.mjs cancel [job-id] [--json]",
@@ -257,11 +267,11 @@ function handleReview(argv) {
     return;
   }
 
-  const base = options.base || detectBaseBranch(cwd);
   const scope = options.scope || "auto";
+  const base = options.base || null;
+  const ctx = collectReviewContext(cwd, { base, scope });
 
-  const diff = getDiff({ base, scope, cwd });
-  if (!diff.trim()) {
+  if (!ctx.content.trim() || ctx.content.replace(/## \w+\n\n\(none\)\n/g, "").trim() === "") {
     const noChanges = { ok: true, verdict: "no_changes", response: "No changes to review." };
     outputResult(
       options.json ? noChanges : "No changes to review.\n",
@@ -271,26 +281,23 @@ function handleReview(argv) {
   }
 
   let truncated = false;
-  let diffText = diff;
-  if (diff.length > MAX_DIFF_LENGTH) {
-    diffText = diff.slice(0, MAX_DIFF_LENGTH) + "\n\n... [TRUNCATED — diff too large] ...";
+  let reviewInput = ctx.content;
+  if (reviewInput.length > MAX_DIFF_LENGTH) {
+    reviewInput = reviewInput.slice(0, MAX_DIFF_LENGTH) + "\n\n... [TRUNCATED — diff too large] ...";
     truncated = true;
   }
 
   const focusText = positionals.join(" ").trim();
   const focusLine = focusText ? `\nFocus area: ${focusText}\n` : "";
+  const schema = loadReviewSchema();
+  const schemaBlock = schema
+    ? `\n\nYou MUST respond with valid JSON matching this schema:\n\`\`\`json\n${schema}\n\`\`\`\n`
+    : "";
 
-  const prompt = `Review the following git diff. For each issue found, provide:
-- severity: critical / high / medium / low
-- file and line range
-- description and recommendation
+  const prompt = `Review the following repository changes.
+${ctx.summary}${focusLine}${schemaBlock}
 
-Be thorough but concise. Focus on bugs, security issues, and logic errors.
-Do not comment on style unless it causes bugs.${focusLine}
-
-\`\`\`diff
-${diffText}
-\`\`\``;
+${reviewInput}`;
 
   const result = callGemini({
     prompt,
@@ -345,11 +352,11 @@ function handleAdversarialReview(argv) {
     return;
   }
 
-  const base = options.base || detectBaseBranch(cwd);
   const scope = options.scope || "auto";
-  const diff = getDiff({ base, scope, cwd });
+  const base = options.base || null;
+  const ctx = collectReviewContext(cwd, { base, scope });
 
-  if (!diff.trim()) {
+  if (!ctx.content.trim() || ctx.content.replace(/## \w+\n\n\(none\)\n/g, "").trim() === "") {
     outputResult(
       options.json
         ? { ok: true, verdict: "no_changes", response: "No changes to review." }
@@ -359,19 +366,21 @@ function handleAdversarialReview(argv) {
     return;
   }
 
-  let diffText = diff;
+  let reviewInput = ctx.content;
   let truncated = false;
-  if (diff.length > MAX_DIFF_LENGTH) {
-    diffText = diff.slice(0, MAX_DIFF_LENGTH) + "\n\n... [TRUNCATED — diff too large] ...";
+  if (reviewInput.length > MAX_DIFF_LENGTH) {
+    reviewInput = reviewInput.slice(0, MAX_DIFF_LENGTH) + "\n\n... [TRUNCATED — diff too large] ...";
     truncated = true;
   }
 
   const focusText = positionals.join(" ").trim();
+  const schema = loadReviewSchema();
   const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
   const prompt = interpolateTemplate(template, {
-    TARGET_LABEL: scope === "branch" ? `branch vs ${base}` : "working tree changes",
+    TARGET_LABEL: ctx.mode === "branch" ? `branch (${ctx.summary})` : "working tree changes",
     USER_FOCUS: focusText || "No extra focus provided.",
-    REVIEW_INPUT: diffText,
+    REVIEW_INPUT: reviewInput,
+    REVIEW_SCHEMA: schema || "(schema unavailable — use the field structure described above)",
   });
 
   const result = callGemini({

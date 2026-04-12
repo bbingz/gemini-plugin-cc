@@ -45,12 +45,11 @@ A finding should answer:
 </finding_bar>
 
 <output_contract>
-For each finding provide:
-- severity: critical / high / medium / low
-- file and line range
-- description of the vulnerability or failure mode
-- confidence score (0-1)
-- concrete recommendation
+You MUST respond with valid JSON matching this schema:
+
+```json
+{{REVIEW_SCHEMA}}
+```
 
 Write the summary like a terse ship/no-ship assessment, not a neutral recap.
 </output_contract>

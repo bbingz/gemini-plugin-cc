@@ -25,7 +25,7 @@ function computeWorkspaceSlug(workspaceRoot) {
   return `${slug}-${hash}`;
 }
 
-function stateRootDir() {
+export function stateRootDir() {
   const pluginData = process.env[PLUGIN_DATA_ENV];
   if (pluginData) {
     return path.join(pluginData, "state");

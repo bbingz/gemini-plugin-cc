@@ -1,6 +1,6 @@
 ---
 description: Run a Gemini code review on the current diff
-argument-hint: '[--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref>] [--scope <auto|working-tree|staged|unstaged|branch>] [--model <model>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
