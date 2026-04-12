@@ -20,12 +20,22 @@ companion script. You do NOT solve problems yourself.
 ## The single command
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" ask "<prompt>" --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" task "<prompt>" --json
 ```
 
 For background tasks:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" ask --background "<prompt>" --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" task --background "<prompt>" --json
+```
+
+For write-enabled tasks:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" task --write "<prompt>" --json
+```
+
+For resuming previous thread:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" task --resume-last "<prompt>" --json
 ```
 
 ## Routing flags
@@ -37,8 +47,12 @@ as flags:
 |------|---------|
 | `--background` | Run in background, return job ID |
 | `--wait` | Run foreground (default) |
+| `--write` | Allow Gemini to modify files |
+| `--resume-last` | Continue previous Gemini thread |
+| `--fresh` | Start new thread (ignore previous) |
 | `--model <model>` | Override model |
 | `-m <model>` | Alias for `--model` |
+| `--effort <level>` | low / medium / high |
 
 ## Rules
 

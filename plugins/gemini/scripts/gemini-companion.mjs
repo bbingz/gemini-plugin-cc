@@ -17,8 +17,10 @@ import {
   readStoredJobResult,
   resolveCancelableJob,
   resolveResultJob,
+  resolveResumeCandidate,
   runJobInBackground,
   runWorker,
+  waitForJob,
 } from "./lib/job-control.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 import {
@@ -30,7 +32,7 @@ import {
   renderStoredJobResult,
   renderCancelReport,
 } from "./lib/render.mjs";
-import { getConfig, setConfig } from "./lib/state.mjs";
+import { getConfig, setConfig, upsertJob } from "./lib/state.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SELF = fileURLToPath(import.meta.url);
@@ -53,9 +55,11 @@ function printUsage() {
       "Usage:",
       "  gemini-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  gemini-companion.mjs ask [--model <model>] [--approval-mode <mode>] [--effort <low|medium|high>] [--background|--wait] [--json] <prompt>",
+      "  gemini-companion.mjs task [--write] [--resume-last|--fresh] [--model <model>] [--effort <low|medium|high>] [--prompt-file <path>] [--background|--wait] [--json] <prompt>",
+      "  gemini-companion.mjs task-resume-candidate [--json]",
       "  gemini-companion.mjs review [--base <ref>] [--scope <auto|working-tree|staged|unstaged|branch>] [--model <model>] [--background|--wait] [--json]",
       "  gemini-companion.mjs adversarial-review [--base <ref>] [--scope <auto|working-tree|staged|unstaged|branch>] [--background|--wait] [--json] [focus ...]",
-      "  gemini-companion.mjs status [job-id] [--all] [--json]",
+      "  gemini-companion.mjs status [job-id] [--all] [--wait] [--json]",
       "  gemini-companion.mjs result [job-id] [--json]",
       "  gemini-companion.mjs cancel [job-id] [--json]",
     ].join("\n")
@@ -397,17 +401,194 @@ function handleAdversarialReview(argv) {
   if (!result.ok) process.exitCode = 1;
 }
 
-// ── Status ───────────────────────────────────────────────
+// ── Task ────────────────────────────────────────────────
 
-function handleStatus(argv) {
+const DEFAULT_CONTINUE_PROMPT = "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
+
+function readPromptFromFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8").trim();
+  } catch (e) {
+    throw new Error(`Cannot read prompt file: ${e.message}`);
+  }
+}
+
+function readStdinIfPiped() {
+  try {
+    if (process.stdin.isTTY) return null;
+    return fs.readFileSync(0, "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function handleTask(argv) {
   const { options, positionals } = parseArgs(argv, {
-    booleanOptions: ["json", "all"],
+    booleanOptions: ["json", "background", "wait", "write", "resume-last", "fresh"],
+    valueOptions: ["model", "effort", "prompt-file", "cwd"],
+    aliasMap: { m: "model" },
+  });
+
+  // Validate mutually exclusive flags
+  if (options["resume-last"] && options.fresh) {
+    outputResult(
+      options.json
+        ? { ok: false, error: "Choose either --resume-last or --fresh, not both." }
+        : "Error: Choose either --resume-last or --fresh, not both.\n",
+      options.json
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // Resolve prompt from: --prompt-file > positionals > stdin
+  let prompt;
+  if (options["prompt-file"]) {
+    try {
+      prompt = readPromptFromFile(options["prompt-file"]);
+    } catch (e) {
+      outputResult(
+        options.json ? { ok: false, error: e.message } : `Error: ${e.message}\n`,
+        options.json
+      );
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    prompt = positionals.join(" ").trim();
+    if (!prompt) {
+      const stdinPrompt = readStdinIfPiped();
+      if (stdinPrompt) prompt = stdinPrompt;
+    }
+  }
+
+  // Apply effort modifier
+  prompt = applyEffort(prompt, options.effort);
+
+  // Resume-last with no prompt gets a default continue prompt
+  if (!prompt && options["resume-last"]) {
+    prompt = DEFAULT_CONTINUE_PROMPT;
+  }
+
+  if (!prompt) {
+    outputResult(
+      options.json
+        ? { ok: false, error: "Provide a prompt, a --prompt-file, piped stdin, or use --resume-last." }
+        : "Error: Provide a prompt, a --prompt-file, piped stdin, or use --resume-last.\n",
+      options.json
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const cwd = resolveCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const write = Boolean(options.write);
+  const approvalMode = write ? "auto_edit" : "plan";
+
+  // Resolve resume session
+  let resumeSessionId = null;
+  if (options["resume-last"]) {
+    const candidate = resolveResumeCandidate(workspaceRoot);
+    if (candidate?.available) {
+      resumeSessionId = candidate.candidate.geminiSessionId;
+    }
+    // If no candidate found, proceed without resume (start fresh)
+  }
+
+  // Background mode
+  if (options.background) {
+    const job = createJob({ kind: "task", command: "task", prompt, workspaceRoot, cwd, write });
+    const bgArgs = ["task", prompt];
+    if (options.model) bgArgs.push("--model", options.model);
+    if (write) bgArgs.push("--write");
+    if (resumeSessionId) bgArgs.push("--resume-last");
+
+    const submission = runJobInBackground({ job, companionScript: SELF, args: bgArgs, workspaceRoot, cwd });
+    outputResult(
+      options.json ? submission : renderJobSubmitted(submission),
+      options.json
+    );
+    return;
+  }
+
+  const result = callGemini({
+    prompt,
+    model: options.model || null,
+    approvalMode,
+    cwd,
+    resumeSessionId,
+  });
+
+  // Persist geminiSessionId for future resume
+  if (result.ok && result.sessionId) {
+    // Create a job record for tracking even in foreground
+    const job = createJob({ kind: "task", command: "task", prompt, workspaceRoot, cwd, write });
+    upsertJob(workspaceRoot, {
+      id: job.id,
+      status: "completed",
+      phase: "done",
+      geminiSessionId: result.sessionId,
+      pid: null,
+    });
+  }
+
+  outputResult(
+    options.json ? { ...result, write, resumed: Boolean(resumeSessionId) } : renderGeminiResult(result),
+    options.json
+  );
+  if (!result.ok) process.exitCode = 1;
+}
+
+function handleTaskResumeCandidate(argv) {
+  const { options } = parseArgs(argv, {
+    booleanOptions: ["json"],
     valueOptions: ["cwd"],
   });
 
   const cwd = resolveCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const result = resolveResumeCandidate(workspaceRoot) || { available: false, candidate: null };
+
+  outputResult(result, options.json ?? true);
+}
+
+// ── Status ───────────────────────────────────────────────
+
+function handleStatus(argv) {
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json", "all", "wait"],
+    valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
+  });
+
+  const cwd = resolveCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const reference = positionals[0] || null;
+
+  // --wait: poll a specific job until it completes
+  if (options.wait && reference) {
+    const timeoutMs = options["timeout-ms"] ? parseInt(options["timeout-ms"], 10) : undefined;
+    const pollIntervalMs = options["poll-interval-ms"] ? parseInt(options["poll-interval-ms"], 10) : undefined;
+    const result = waitForJob(workspaceRoot, reference, { timeoutMs, pollIntervalMs });
+    if (result.error) {
+      outputResult(
+        options.json ? result : `Error: ${result.error}\n`,
+        options.json
+      );
+      process.exitCode = 1;
+      return;
+    }
+    outputResult(
+      options.json ? result : renderStatusReport({
+        totalJobs: 1,
+        running: result.status === "running" ? [result] : [],
+        recent: result.status !== "running" ? [result] : [],
+        waitTimedOut: result.waitTimedOut,
+      }),
+      options.json
+    );
+    return;
+  }
 
   if (reference) {
     const snapshot = buildSingleJobSnapshot(workspaceRoot, reference);
@@ -511,6 +692,12 @@ switch (subcommand) {
     break;
   case "ask":
     handleAsk(subArgv);
+    break;
+  case "task":
+    handleTask(subArgv);
+    break;
+  case "task-resume-candidate":
+    handleTaskResumeCandidate(subArgv);
     break;
   case "review":
     handleReview(subArgv);

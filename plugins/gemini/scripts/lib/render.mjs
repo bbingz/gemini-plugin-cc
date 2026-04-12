@@ -109,11 +109,11 @@ export function renderStatusReport(snapshot) {
 
   if (snapshot.running.length > 0) {
     lines.push("## Running Jobs\n");
-    lines.push("| Job ID | Type | Status | Elapsed |");
-    lines.push("|--------|------|--------|---------|");
+    lines.push("| Job ID | Type | Phase | Elapsed |");
+    lines.push("|--------|------|-------|---------|");
     for (const job of snapshot.running) {
       lines.push(
-        `| \`${job.id}\` | ${job.kindLabel} | ${job.status} | ${job.elapsed || "?"} |`
+        `| \`${job.id}\` | ${job.kindLabel} | ${job.phase || job.status} | ${job.elapsed || "?"} |`
       );
     }
     if (snapshot.running[0]?.progressPreview) {
@@ -123,17 +123,46 @@ export function renderStatusReport(snapshot) {
 
   if (snapshot.recent.length > 0) {
     lines.push("\n## Recent Jobs\n");
-    lines.push("| Job ID | Type | Status | Duration |");
-    lines.push("|--------|------|--------|----------|");
+    lines.push("| Job ID | Type | Status | Phase | Duration |");
+    lines.push("|--------|------|--------|-------|----------|");
     for (const job of snapshot.recent) {
       lines.push(
-        `| \`${job.id}\` | ${job.kindLabel} | ${job.status} | ${job.elapsed || "?"} |`
+        `| \`${job.id}\` | ${job.kindLabel} | ${job.status} | ${job.phase || "-"} | ${job.elapsed || "?"} |`
       );
     }
+
+    // Latest finished hint
+    const latestFinished = snapshot.recent.find((j) => j.status === "completed" || j.status === "failed");
+    if (latestFinished) {
+      lines.push(`\n**Latest finished:** \`${latestFinished.id}\` (${latestFinished.status})`);
+      if (latestFinished.prompt) lines.push(`  ${latestFinished.prompt}`);
+      lines.push(renderFollowUpHints(latestFinished));
+    }
+  }
+
+  if (snapshot.waitTimedOut) {
+    lines.push("\n> **Warning:** Wait timed out. The job is still running.");
   }
 
   lines.push(`\n*Total jobs: ${snapshot.totalJobs}*`);
   return lines.join("\n") + "\n";
+}
+
+function renderFollowUpHints(job) {
+  const hints = [];
+  if (job.status === "running" || job.status === "queued") {
+    hints.push(`  - Cancel: \`/gemini:cancel ${job.id}\``);
+  }
+  if (job.status === "completed" || job.status === "failed") {
+    hints.push(`  - View result: \`/gemini:result ${job.id}\``);
+  }
+  if (job.kind === "task" && job.write) {
+    hints.push(`  - Review changes: \`/gemini:review --wait\``);
+  }
+  if (job.geminiSessionId) {
+    hints.push(`  - Resume: \`/gemini:rescue --resume-last\``);
+  }
+  return hints.join("\n");
 }
 
 /**

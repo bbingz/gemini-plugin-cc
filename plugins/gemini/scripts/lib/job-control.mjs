@@ -18,11 +18,20 @@ import {
 export const SESSION_ID_ENV = "GEMINI_COMPANION_SESSION_ID";
 const DEFAULT_MAX_STATUS_JOBS = 8;
 const DEFAULT_MAX_PROGRESS_LINES = 4;
+const DEFAULT_WAIT_TIMEOUT_MS = 240_000; // 4 minutes
+const DEFAULT_POLL_INTERVAL_MS = 2_000;  // 2 seconds
 
 // ── Job creation ─────────────────────────────────────────
 
-export function createJob({ kind, command, prompt, workspaceRoot, cwd }) {
-  const id = generateJobId(kind === "review" ? "gr" : "ga");
+const JOB_PREFIXES = {
+  review: "gr",
+  "adversarial-review": "gr",
+  task: "gt",
+};
+
+export function createJob({ kind, command, prompt, workspaceRoot, cwd, write = false }) {
+  const prefix = JOB_PREFIXES[kind] || "ga";
+  const id = generateJobId(prefix);
   const sessionId = process.env[SESSION_ID_ENV] || null;
   const now = new Date().toISOString();
 
@@ -32,8 +41,11 @@ export function createJob({ kind, command, prompt, workspaceRoot, cwd }) {
     command,
     prompt: prompt?.slice(0, 200),
     status: "queued",
+    phase: "queued",
     pid: null,
     sessionId,
+    geminiSessionId: null,
+    write,
     createdAt: now,
     updatedAt: now,
     cwd,
@@ -81,6 +93,7 @@ export function runJobInBackground({
   upsertJob(workspaceRoot, {
     id: job.id,
     status: "running",
+    phase: "starting",
     pid: child.pid,
   });
 
@@ -92,6 +105,8 @@ export function runJobInBackground({
  * Runs the foreground command, captures JSON output, and persists result.
  */
 export function runWorker(jobId, workspaceRoot, companionScript, args) {
+  // Update phase to running
+  upsertJob(workspaceRoot, { id: jobId, phase: "running" });
 
   // Run the actual command in foreground (within this subprocess)
   const result = spawnSync("node", [companionScript, ...args, "--json"], {
@@ -104,6 +119,7 @@ export function runWorker(jobId, workspaceRoot, companionScript, args) {
   const now = new Date().toISOString();
   const exitCode = result.status ?? 1;
   const status = exitCode === 0 ? "completed" : "failed";
+  const phase = exitCode === 0 ? "done" : "failed";
 
   // Try to parse JSON from stdout
   let parsedResult = null;
@@ -116,6 +132,9 @@ export function runWorker(jobId, workspaceRoot, companionScript, args) {
       // ignore
     }
   }
+
+  // Extract Gemini session ID for thread resumption
+  const geminiSessionId = parsedResult?.sessionId || null;
 
   // Persist result
   writeJobFile(workspaceRoot, jobId, {
@@ -130,8 +149,10 @@ export function runWorker(jobId, workspaceRoot, companionScript, args) {
   upsertJob(workspaceRoot, {
     id: jobId,
     status,
+    phase,
     exitCode,
     pid: null,
+    geminiSessionId,
   });
 
   // Log completion
@@ -158,6 +179,8 @@ export function filterJobsForCurrentSession(jobs) {
 
 export function getJobKindLabel(job) {
   if (job.kind === "review") return "review";
+  if (job.kind === "adversarial-review") return "adversarial";
+  if (job.kind === "task") return "task";
   if (job.kind === "ask") return "ask";
   return "job";
 }
@@ -298,6 +321,32 @@ function matchJobReference(jobs, reference) {
   return null;
 }
 
+// ── Wait for job ────────────────────────────────────────
+
+function sleepSync(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* spin */ }
+}
+
+export function waitForJob(workspaceRoot, jobId, {
+  timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const snapshot = buildSingleJobSnapshot(workspaceRoot, jobId);
+    if (!snapshot) return { error: "Job not found", waitTimedOut: false };
+    if (snapshot.status !== "queued" && snapshot.status !== "running") {
+      return { ...snapshot, waitTimedOut: false };
+    }
+    sleepSync(pollIntervalMs);
+  }
+
+  const final = buildSingleJobSnapshot(workspaceRoot, jobId);
+  return { ...final, waitTimedOut: true, timeoutMs };
+}
+
 // ── Job cancellation ─────────────────────────────────────
 
 export function cancelJob(workspaceRoot, jobId) {
@@ -309,27 +358,62 @@ export function cancelJob(workspaceRoot, jobId) {
     return { cancelled: false, reason: `Job is ${job.status}, not cancellable` };
   }
 
-  // Kill the process
+  // Kill the process — try SIGINT first (graceful), then SIGTERM
   if (job.pid) {
     try {
-      // Try process group first
-      process.kill(-job.pid, "SIGTERM");
+      process.kill(-job.pid, "SIGINT");
     } catch {
       try {
-        process.kill(job.pid, "SIGTERM");
+        process.kill(job.pid, "SIGINT");
       } catch {
         // Process already gone
       }
+    }
+    // Give it a moment to clean up, then force kill
+    sleepSync(500);
+    try {
+      process.kill(job.pid, 0); // check if alive
+      try { process.kill(-job.pid, "SIGTERM"); } catch {
+        try { process.kill(job.pid, "SIGTERM"); } catch { /* gone */ }
+      }
+    } catch {
+      // Already dead — good
     }
   }
 
   upsertJob(workspaceRoot, {
     id: jobId,
     status: "cancelled",
+    phase: "cancelled",
     pid: null,
   });
 
   return { cancelled: true, jobId };
+}
+
+// ── Resume candidate ────────────────────────────────────
+
+/**
+ * Find the latest completed task job with a geminiSessionId for resumption.
+ */
+export function resolveResumeCandidate(workspaceRoot) {
+  const jobs = listJobs(workspaceRoot);
+  const taskJobs = jobs
+    .filter((j) => j.kind === "task" && j.status === "completed" && j.geminiSessionId)
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+
+  if (taskJobs.length === 0) return null;
+  const candidate = taskJobs[0];
+  return {
+    available: true,
+    candidate: {
+      id: candidate.id,
+      status: candidate.status,
+      prompt: candidate.prompt,
+      geminiSessionId: candidate.geminiSessionId,
+      completedAt: candidate.updatedAt,
+    },
+  };
 }
 
 // ── Read stored job result ───────────────────────────────

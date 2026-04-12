@@ -16,6 +16,7 @@ export function callGemini({
   cwd,
   timeout = DEFAULT_TIMEOUT_MS,
   extraArgs = [],
+  resumeSessionId = null,
 }) {
   // Use stdin for large prompts to avoid E2BIG (ARG_MAX) errors.
   // Gemini CLI appends stdin content after the -p prompt.
@@ -23,6 +24,7 @@ export function callGemini({
   const args = ["-p", useStdin ? "" : prompt, "-o", "json"];
   if (model) args.push("-m", model);
   args.push("--approval-mode", approvalMode);
+  if (resumeSessionId) args.push("--resume", resumeSessionId);
   args.push(...extraArgs);
 
   const result = runCommand("gemini", args, {
