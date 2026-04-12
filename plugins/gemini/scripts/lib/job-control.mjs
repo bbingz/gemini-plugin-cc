@@ -133,6 +133,14 @@ export function runWorker(jobId, workspaceRoot, companionScript, args) {
     }
   }
 
+  // Check if job was cancelled while running — don't overwrite cancel state
+  const currentJobs = listJobs(workspaceRoot);
+  const currentJob = currentJobs.find((j) => j.id === jobId);
+  if (currentJob?.status === "cancelled") {
+    console.log(`\n[${now}] Job ${jobId} was cancelled during execution`);
+    return;
+  }
+
   // Extract Gemini session ID for thread resumption
   const geminiSessionId = parsedResult?.sessionId || null;
 
@@ -203,8 +211,9 @@ function enrichJob(job, workspaceRoot) {
   // Check if running job is actually still alive
   if (enriched.status === "running" && enriched.pid && !isProcessAlive(enriched.pid)) {
     enriched.status = "failed";
+    enriched.phase = "failed";
     enriched.detail = "Process exited unexpectedly";
-    upsertJob(workspaceRoot, { id: enriched.id, status: "failed", pid: null });
+    upsertJob(workspaceRoot, { id: enriched.id, status: "failed", phase: "failed", pid: null });
   }
 
   // Add elapsed time
@@ -395,12 +404,21 @@ export function cancelJob(workspaceRoot, jobId) {
 
 /**
  * Find the latest completed task job with a geminiSessionId for resumption.
+ * Scoped to the current Claude session to prevent cross-session thread leakage.
  */
 export function resolveResumeCandidate(workspaceRoot) {
   const jobs = listJobs(workspaceRoot);
-  const taskJobs = jobs
+  const currentSession = getCurrentSessionId();
+
+  // Prefer current session, fall back to any session if none found
+  let taskJobs = jobs
     .filter((j) => j.kind === "task" && j.status === "completed" && j.geminiSessionId)
     .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+
+  if (currentSession) {
+    const sessionScoped = taskJobs.filter((j) => j.sessionId === currentSession);
+    if (sessionScoped.length > 0) taskJobs = sessionScoped;
+  }
 
   if (taskJobs.length === 0) return null;
   const candidate = taskJobs[0];

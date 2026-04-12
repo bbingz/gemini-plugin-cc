@@ -33,4 +33,5 @@ Operating rules:
 - Return the Gemini companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary.
 - Do not ask the subagent to inspect files, monitor progress, poll status, or do follow-up work.
-- If the user did not supply a request, ask what Gemini should investigate or fix.
+- If the user did not supply a request AND `--resume-last` is present, proceed with the default continue prompt (the task runtime handles this).
+- If the user did not supply a request AND no `--resume-last`, ask what Gemini should investigate or fix.

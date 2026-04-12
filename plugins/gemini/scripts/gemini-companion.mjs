@@ -425,7 +425,7 @@ function readStdinIfPiped() {
 function handleTask(argv) {
   const { options, positionals } = parseArgs(argv, {
     booleanOptions: ["json", "background", "wait", "write", "resume-last", "fresh"],
-    valueOptions: ["model", "effort", "prompt-file", "cwd"],
+    valueOptions: ["model", "effort", "prompt-file", "cwd", "resume-session-id"],
     aliasMap: { m: "model" },
   });
 
@@ -462,9 +462,6 @@ function handleTask(argv) {
     }
   }
 
-  // Apply effort modifier
-  prompt = applyEffort(prompt, options.effort);
-
   // Resume-last with no prompt gets a default continue prompt
   if (!prompt && options["resume-last"]) {
     prompt = DEFAULT_CONTINUE_PROMPT;
@@ -481,19 +478,21 @@ function handleTask(argv) {
     return;
   }
 
+  // Apply effort modifier after prompt is resolved
+  prompt = applyEffort(prompt, options.effort);
+
   const cwd = resolveCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const write = Boolean(options.write);
   const approvalMode = write ? "auto_edit" : "plan";
 
-  // Resolve resume session
-  let resumeSessionId = null;
-  if (options["resume-last"]) {
+  // Resolve resume session — explicit ID takes priority (used by background worker)
+  let resumeSessionId = options["resume-session-id"] || null;
+  if (!resumeSessionId && options["resume-last"]) {
     const candidate = resolveResumeCandidate(workspaceRoot);
     if (candidate?.available) {
       resumeSessionId = candidate.candidate.geminiSessionId;
     }
-    // If no candidate found, proceed without resume (start fresh)
   }
 
   // Background mode
@@ -502,7 +501,8 @@ function handleTask(argv) {
     const bgArgs = ["task", prompt];
     if (options.model) bgArgs.push("--model", options.model);
     if (write) bgArgs.push("--write");
-    if (resumeSessionId) bgArgs.push("--resume-last");
+    // Pass resolved sessionId directly to avoid race in worker re-resolution
+    if (resumeSessionId) bgArgs.push("--resume-session-id", resumeSessionId);
 
     const submission = runJobInBackground({ job, companionScript: SELF, args: bgArgs, workspaceRoot, cwd });
     outputResult(

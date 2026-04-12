@@ -71,12 +71,23 @@ function defaultState() {
 
 export function loadState(workspaceRoot) {
   const file = resolveStateFile(workspaceRoot);
-  try {
-    const raw = fs.readFileSync(file, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return defaultState();
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const raw = fs.readFileSync(file, "utf8");
+      if (!raw.trim()) continue; // empty file from concurrent write
+      const state = JSON.parse(raw);
+      if (state && typeof state === "object") return state;
+    } catch {
+      if (attempt < maxRetries - 1) {
+        // Brief pause before retry — concurrent writer may still be flushing
+        const waitUntil = Date.now() + 20;
+        while (Date.now() < waitUntil) { /* spin */ }
+        continue;
+      }
+    }
   }
+  return defaultState();
 }
 
 export function saveState(workspaceRoot, state) {
