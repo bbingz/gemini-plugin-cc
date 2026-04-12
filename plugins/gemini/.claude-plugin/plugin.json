@@ -1,5 +1,6 @@
 {
   "name": "gemini",
+  "version": "0.1.0",
   "description": "Use Gemini from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "bing"

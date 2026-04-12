@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "gemini-plugin",
+  "version": "1.0.0",
+  "description": "Gemini CLI plugin for Claude Code",
+  "owner": {
+    "name": "bing"
+  },
+  "plugins": [
+    {
+      "name": "gemini",
+      "description": "Use Gemini from Claude Code to review code or delegate tasks.",
+      "version": "0.1.0",
+      "author": {
+        "name": "bing"
+      },
+      "source": "./plugins/gemini",
+      "category": "development"
+    }
+  ]
+}
