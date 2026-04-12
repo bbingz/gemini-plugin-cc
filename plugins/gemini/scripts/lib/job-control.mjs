@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 
+import { callGeminiStreaming } from "./gemini.mjs";
 import {
   ensureStateDir,
   generateJobId,
@@ -9,6 +11,8 @@ import {
   readJobFile,
   resolveJobFile,
   resolveJobLogFile,
+  resolveStateDir,
+  updateState,
   upsertJob,
   writeJobFile,
 } from "./state.mjs";
@@ -165,6 +169,116 @@ export function runWorker(jobId, workspaceRoot, companionScript, args) {
 
   // Log completion
   console.log(`\n[${now}] Job ${jobId} ${status} (exit ${exitCode})`);
+}
+
+/**
+ * Streaming worker — calls callGeminiStreaming directly instead of CLI re-entry.
+ * Used for task/ask commands. Writes streaming events to log for live progress.
+ */
+export async function runStreamingWorker(jobId, workspaceRoot, config) {
+  upsertJob(workspaceRoot, { id: jobId, phase: "starting" });
+  const logFile = resolveJobLogFile(workspaceRoot, jobId);
+
+  function appendLog(msg) {
+    try {
+      fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
+    } catch { /* ignore */ }
+  }
+
+  appendLog(`Streaming task started`);
+  if (config.resumeSessionId) appendLog(`Resuming session: ${config.resumeSessionId}`);
+
+  const result = await callGeminiStreaming({
+    prompt: config.prompt,
+    model: config.model || null,
+    approvalMode: config.approvalMode || "plan",
+    cwd: config.cwd || process.cwd(),
+    timeout: config.timeout || 600_000,
+    resumeSessionId: config.resumeSessionId || null,
+    onEvent: (event) => {
+      if (event.type === "init") {
+        upsertJob(workspaceRoot, { id: jobId, phase: "running" });
+        appendLog(`Model: ${event.model || "?"}`);
+      } else if (event.type === "message" && event.role === "assistant" && event.content) {
+        // Write assistant content to log for progress preview
+        try { fs.appendFileSync(logFile, event.content); } catch { /* ignore */ }
+      } else if (event.type === "result") {
+        try { fs.appendFileSync(logFile, "\n"); } catch { /* ignore */ }
+        appendLog(`Completed: ${event.status || "?"}`);
+      }
+    },
+  });
+
+  const now = new Date().toISOString();
+
+  const status = result.ok ? "completed" : "failed";
+  const phase = result.ok ? "done" : "failed";
+  const geminiSessionId = result.sessionId || null;
+
+  writeJobFile(workspaceRoot, jobId, {
+    id: jobId,
+    status,
+    result,
+    completedAt: now,
+  });
+
+  // Atomically update only if not cancelled (avoid overwriting user cancel)
+  updateState(workspaceRoot, (state) => {
+    const job = state.jobs.find((j) => j.id === jobId);
+    if (!job || job.status === "cancelled") return; // don't overwrite cancel
+    Object.assign(job, {
+      status,
+      phase,
+      pid: null,
+      geminiSessionId,
+      updatedAt: now,
+    });
+  });
+
+  appendLog(`Job ${jobId} ${status}`);
+}
+
+/**
+ * Spawn a streaming background worker.
+ * Passes config as a JSON file instead of CLI args.
+ */
+export function runStreamingJobInBackground({
+  job,
+  companionScript,
+  config,
+  workspaceRoot,
+  cwd,
+}) {
+  ensureStateDir(workspaceRoot);
+
+  const logFile = resolveJobLogFile(workspaceRoot, job.id);
+  const logFd = fs.openSync(logFile, "w");
+
+  fs.writeSync(logFd, `[${new Date().toISOString()}] Job ${job.id} started (streaming)\n`);
+
+  // Write config to a temporary file for the worker to read.
+  // Use resolveStateDir (not resolveJobFile) to avoid orphan cleanup deleting it.
+  const configFile = path.join(resolveStateDir(workspaceRoot), `${job.id}.config.json`);
+  fs.writeFileSync(configFile, JSON.stringify(config));
+
+  const child = spawn("node", [companionScript, "_stream-worker", job.id, workspaceRoot, configFile], {
+    cwd,
+    stdio: ["ignore", logFd, logFd],
+    detached: true,
+    env: { ...process.env },
+  });
+
+  child.unref();
+  fs.closeSync(logFd);
+
+  upsertJob(workspaceRoot, {
+    id: job.id,
+    status: "running",
+    phase: "starting",
+    pid: child.pid,
+  });
+
+  return { jobId: job.id, pid: child.pid };
 }
 
 // ── Job queries ──────────────────────────────────────────

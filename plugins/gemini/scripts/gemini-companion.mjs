@@ -6,7 +6,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs } from "./lib/args.mjs";
-import { callGemini, getGeminiAvailability, getGeminiAuthStatus } from "./lib/gemini.mjs";
+import { callGemini, callGeminiStreaming, getGeminiAvailability, getGeminiAuthStatus } from "./lib/gemini.mjs";
 import { ensureGitRepository, collectReviewContext } from "./lib/git.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -19,6 +19,8 @@ import {
   resolveResultJob,
   resolveResumeCandidate,
   runJobInBackground,
+  runStreamingJobInBackground,
+  runStreamingWorker,
   runWorker,
   waitForJob,
 } from "./lib/job-control.mjs";
@@ -180,7 +182,7 @@ function applyEffort(prompt, effort) {
   return prompt; // medium is default
 }
 
-function handleAsk(argv) {
+async function handleAsk(argv) {
   const { options, positionals } = parseArgs(argv, {
     booleanOptions: ["json", "background", "wait"],
     valueOptions: ["model", "approval-mode", "effort", "cwd"],
@@ -201,16 +203,19 @@ function handleAsk(argv) {
   }
 
   const cwd = resolveCwd(options);
+  const approvalMode = options["approval-mode"] || "auto_edit";
 
-  // Background mode
+  // Background mode — use streaming worker
   if (options.background) {
     const workspaceRoot = resolveWorkspaceRoot(cwd);
     const job = createJob({ kind: "ask", command: "ask", prompt, workspaceRoot, cwd });
-    const bgArgs = ["ask", prompt];
-    if (options.model) bgArgs.push("--model", options.model);
-    if (options["approval-mode"]) bgArgs.push("--approval-mode", options["approval-mode"]);
-
-    const submission = runJobInBackground({ job, companionScript: SELF, args: bgArgs, workspaceRoot, cwd });
+    const submission = runStreamingJobInBackground({
+      job,
+      companionScript: SELF,
+      config: { prompt, model: options.model || null, approvalMode, cwd },
+      workspaceRoot,
+      cwd,
+    });
     outputResult(
       options.json ? submission : renderJobSubmitted(submission),
       options.json
@@ -218,10 +223,11 @@ function handleAsk(argv) {
     return;
   }
 
-  const result = callGemini({
+  // Foreground — use streaming
+  const result = await callGeminiStreaming({
     prompt,
     model: options.model || null,
-    approvalMode: options["approval-mode"] || "auto_edit",
+    approvalMode,
     cwd,
   });
 
@@ -422,7 +428,7 @@ function readStdinIfPiped() {
   }
 }
 
-function handleTask(argv) {
+async function handleTask(argv) {
   const { options, positionals } = parseArgs(argv, {
     booleanOptions: ["json", "background", "wait", "write", "resume-last", "fresh"],
     valueOptions: ["model", "effort", "prompt-file", "cwd", "resume-session-id"],
@@ -495,16 +501,24 @@ function handleTask(argv) {
     }
   }
 
-  // Background mode
+  const streamConfig = {
+    prompt,
+    model: options.model || null,
+    approvalMode,
+    cwd,
+    resumeSessionId,
+  };
+
+  // Background mode — use streaming worker
   if (options.background) {
     const job = createJob({ kind: "task", command: "task", prompt, workspaceRoot, cwd, write });
-    const bgArgs = ["task", prompt];
-    if (options.model) bgArgs.push("--model", options.model);
-    if (write) bgArgs.push("--write");
-    // Pass resolved sessionId directly to avoid race in worker re-resolution
-    if (resumeSessionId) bgArgs.push("--resume-session-id", resumeSessionId);
-
-    const submission = runJobInBackground({ job, companionScript: SELF, args: bgArgs, workspaceRoot, cwd });
+    const submission = runStreamingJobInBackground({
+      job,
+      companionScript: SELF,
+      config: streamConfig,
+      workspaceRoot,
+      cwd,
+    });
     outputResult(
       options.json ? submission : renderJobSubmitted(submission),
       options.json
@@ -512,17 +526,19 @@ function handleTask(argv) {
     return;
   }
 
-  const result = callGemini({
-    prompt,
-    model: options.model || null,
-    approvalMode,
-    cwd,
-    resumeSessionId,
+  // Foreground — use streaming for live progress
+  const result = await callGeminiStreaming({
+    ...streamConfig,
+    onEvent: (event) => {
+      // Non-JSON mode: show progress on stderr
+      if (!options.json && event.type === "init") {
+        process.stderr.write(`[gemini] Model: ${event.model || "?"}\n`);
+      }
+    },
   });
 
   // Persist geminiSessionId for future resume
   if (result.ok && result.sessionId) {
-    // Create a job record for tracking even in foreground
     const job = createJob({ kind: "task", command: "task", prompt, workspaceRoot, cwd, write });
     upsertJob(workspaceRoot, {
       id: job.id,
@@ -682,49 +698,64 @@ function handleCancel(argv) {
 
 // ── Main ─────────────────────────────────────────────────
 
-const argv = process.argv.slice(2);
-const subcommand = argv[0];
-const subArgv = argv.slice(1);
+async function main() {
+  const argv = process.argv.slice(2);
+  const subcommand = argv[0];
+  const subArgv = argv.slice(1);
 
-switch (subcommand) {
-  case "setup":
-    handleSetup(subArgv);
-    break;
-  case "ask":
-    handleAsk(subArgv);
-    break;
-  case "task":
-    handleTask(subArgv);
-    break;
-  case "task-resume-candidate":
-    handleTaskResumeCandidate(subArgv);
-    break;
-  case "review":
-    handleReview(subArgv);
-    break;
-  case "adversarial-review":
-    handleAdversarialReview(subArgv);
-    break;
-  case "status":
-    handleStatus(subArgv);
-    break;
-  case "result":
-    handleResult(subArgv);
-    break;
-  case "cancel":
-    handleCancel(subArgv);
-    break;
-  case "_worker": {
-    // Internal: background worker. Args: <jobId> <workspaceRoot> <command> [command-args...]
-    const [jobId, wsRoot, ...workerArgs] = subArgv;
-    runWorker(jobId, wsRoot, SELF, workerArgs);
-    break;
-  }
-  default:
-    if (subcommand) {
-      console.error(`Unknown subcommand: ${subcommand}`);
+  switch (subcommand) {
+    case "setup":
+      handleSetup(subArgv);
+      break;
+    case "ask":
+      await handleAsk(subArgv);
+      break;
+    case "task":
+      await handleTask(subArgv);
+      break;
+    case "task-resume-candidate":
+      handleTaskResumeCandidate(subArgv);
+      break;
+    case "review":
+      handleReview(subArgv);
+      break;
+    case "adversarial-review":
+      handleAdversarialReview(subArgv);
+      break;
+    case "status":
+      handleStatus(subArgv);
+      break;
+    case "result":
+      handleResult(subArgv);
+      break;
+    case "cancel":
+      handleCancel(subArgv);
+      break;
+    case "_worker": {
+      // Internal: legacy background worker (CLI re-entry, used by review)
+      const [jobId, wsRoot, ...workerArgs] = subArgv;
+      runWorker(jobId, wsRoot, SELF, workerArgs);
+      break;
     }
-    printUsage();
-    process.exitCode = 1;
-    break;
+    case "_stream-worker": {
+      // Internal: streaming background worker (direct API, used by task/ask)
+      const [jobId, wsRoot, configFile] = subArgv;
+      const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
+      try { fs.unlinkSync(configFile); } catch { /* ignore */ }
+      await runStreamingWorker(jobId, wsRoot, config);
+      break;
+    }
+    default:
+      if (subcommand) {
+        console.error(`Unknown subcommand: ${subcommand}`);
+      }
+      printUsage();
+      process.exitCode = 1;
+      break;
+  }
 }
+
+main().catch((err) => {
+  process.stderr.write(`${err.message || err}\n`);
+  process.exitCode = 1;
+});

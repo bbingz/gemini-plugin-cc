@@ -1,7 +1,23 @@
+import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { binaryAvailable, runCommand } from "./process.mjs";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const AUTH_CHECK_TIMEOUT_MS = 30_000;
+
+// ── Shared argument builder ─────────────────────────────
+
+function buildGeminiArgs({ prompt, model, approvalMode, outputFormat, resumeSessionId, extraArgs }) {
+  const useStdin = prompt.length > 100_000;
+  const args = ["-p", useStdin ? "" : prompt, "-o", outputFormat];
+  if (model) args.push("-m", model);
+  args.push("--approval-mode", approvalMode);
+  if (resumeSessionId) args.push("--resume", resumeSessionId);
+  if (extraArgs?.length) args.push(...extraArgs);
+  return { args, useStdin };
+}
+
+// ── Synchronous call (existing) ─────────────────────────
 
 /**
  * Call Gemini CLI in headless mode and return a structured result.
@@ -18,14 +34,9 @@ export function callGemini({
   extraArgs = [],
   resumeSessionId = null,
 }) {
-  // Use stdin for large prompts to avoid E2BIG (ARG_MAX) errors.
-  // Gemini CLI appends stdin content after the -p prompt.
-  const useStdin = prompt.length > 100_000;
-  const args = ["-p", useStdin ? "" : prompt, "-o", "json"];
-  if (model) args.push("-m", model);
-  args.push("--approval-mode", approvalMode);
-  if (resumeSessionId) args.push("--resume", resumeSessionId);
-  args.push(...extraArgs);
+  const { args, useStdin } = buildGeminiArgs({
+    prompt, model, approvalMode, outputFormat: "json", resumeSessionId, extraArgs,
+  });
 
   const result = runCommand("gemini", args, {
     cwd,
@@ -97,6 +108,147 @@ function parseStderrError(stderr, exitCode) {
     stderr: text,
   };
 }
+
+// ── Streaming call (async) ───────────────────────────────
+
+/**
+ * Call Gemini CLI in streaming mode (-o stream-json).
+ * Returns a Promise resolving to the same { ok, response, sessionId, stats } shape.
+ *
+ * @param {Object} options
+ * @param {function} options.onEvent - Called for each parsed NDJSON event
+ *   Event types: { type: "init", session_id, model }
+ *                { type: "message", role, content, delta? }
+ *                { type: "result", status, stats }
+ */
+export function callGeminiStreaming({
+  prompt,
+  model,
+  approvalMode = "plan",
+  cwd,
+  timeout = DEFAULT_TIMEOUT_MS,
+  extraArgs = [],
+  resumeSessionId = null,
+  onEvent = () => {},
+}) {
+  const { args, useStdin } = buildGeminiArgs({
+    prompt, model, approvalMode, outputFormat: "stream-json", resumeSessionId, extraArgs,
+  });
+
+  return new Promise((resolve) => {
+    const child = spawn("gemini", args, {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+
+    let sessionId = null;
+    let stats = null;
+    let responseChunks = [];
+    let stderrBuf = "";
+    let lineBuffer = "";
+    let timedOut = false;
+    const decoder = new StringDecoder("utf8");
+
+    // Timeout handler
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+    }, timeout);
+
+    // Write large prompt via stdin
+    if (useStdin) {
+      child.stdin.write(prompt);
+    }
+    child.stdin.end();
+
+    // Parse NDJSON lines from stdout, handling noise prefixes and partial chunks
+    child.stdout.on("data", (chunk) => {
+      lineBuffer += decoder.write(chunk);
+      let newlineIdx;
+      while ((newlineIdx = lineBuffer.indexOf("\n")) >= 0) {
+        const rawLine = lineBuffer.slice(0, newlineIdx);
+        lineBuffer = lineBuffer.slice(newlineIdx + 1);
+        processLine(rawLine);
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderrBuf += chunk.toString();
+    });
+
+    function processLine(raw) {
+      // Find first `{` on this line — skip any noise prefix
+      const jsonStart = raw.indexOf("{");
+      if (jsonStart < 0) return;
+
+      let event;
+      try {
+        event = JSON.parse(raw.slice(jsonStart));
+      } catch {
+        return; // Not valid JSON — skip
+      }
+
+      try { onEvent(event); } catch { /* callback errors don't break us */ }
+
+      if (event.type === "init") {
+        sessionId = event.session_id || null;
+      } else if (event.type === "message" && event.role === "assistant") {
+        if (event.content != null) {
+          responseChunks.push(event.content);
+        }
+      } else if (event.type === "result") {
+        stats = event.stats || null;
+      }
+    }
+
+    child.on("close", (exitCode) => {
+      clearTimeout(timer);
+
+      // Flush decoder and process any remaining data
+      lineBuffer += decoder.end();
+      if (lineBuffer.trim()) {
+        processLine(lineBuffer);
+        lineBuffer = "";
+      }
+
+      if (timedOut) {
+        resolve({
+          ok: false,
+          error: `Gemini timed out after ${Math.round(timeout / 1000)}s. Try a smaller scope.`,
+        });
+        return;
+      }
+
+      if (exitCode !== 0) {
+        const stderrResult = parseStderrError(stderrBuf, exitCode);
+        // Include partial response for recovery if available
+        if (responseChunks.length > 0) {
+          stderrResult.partialResponse = responseChunks.join("");
+        }
+        resolve(stderrResult);
+        return;
+      }
+
+      // Build final response from accumulated assistant deltas
+      const response = responseChunks.join("");
+
+      resolve({
+        ok: true,
+        response,
+        sessionId,
+        stats,
+      });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, error: err.message });
+    });
+  });
+}
+
+// ── Utilities ───────────────────────────────────────────
 
 /**
  * Get Gemini CLI availability (binary + version).
