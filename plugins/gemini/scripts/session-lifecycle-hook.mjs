@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 import process from "node:process";
 
-import { stateRootDir } from "./lib/state.mjs";
+import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
 
 const SESSION_ID_ENV = "GEMINI_COMPANION_SESSION_ID";
 
@@ -46,66 +46,48 @@ function terminateProcess(pid) {
   }
 }
 
-/**
- * Scan ALL workspace state directories for jobs belonging to this session.
- * A session may have spawned jobs in multiple repos/worktrees.
- */
-function cleanupAllSessionJobs(sessionId) {
-  if (!sessionId) return;
-
-  const root = stateRootDir();
-  let entries;
+function resolveWorkspaceRoot(cwd) {
   try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
+    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 3000,
+      stdio: "pipe",
+    });
+    if (result.status === 0 && result.stdout.trim()) {
+      return result.stdout.trim();
+    }
   } catch {
-    return; // No state directory yet
+    // Not a git repo or git unavailable
   }
-
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-
-    const stateFile = path.join(root, entry.name, "state.json");
-    if (!fs.existsSync(stateFile)) continue;
-
-    // Use the directory name as a pseudo workspace root for updateState
-    const wsDir = path.join(root, entry.name);
-    cleanupWorkspaceSessionJobs(wsDir, sessionId);
-  }
+  return cwd;
 }
 
-function cleanupWorkspaceSessionJobs(stateDir, sessionId) {
-  // updateState expects a workspaceRoot and computes stateDir from it.
-  // We need to work at the stateDir level directly. Read + lock manually.
-  const stateFile = path.join(stateDir, "state.json");
-  const lockFile = stateFile + ".lock";
+/**
+ * Clean up jobs belonging to this session in the current workspace only.
+ * Matches Codex approach: O(1) single state file instead of scanning all workspaces.
+ */
+function cleanupSessionJobs(cwd, sessionId) {
+  if (!cwd || !sessionId) return;
 
-  let lockFd;
-  try {
-    lockFd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
-    fs.closeSync(lockFd);
-  } catch {
-    return; // Can't acquire lock during teardown — skip
-  }
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const stateFile = resolveStateFile(workspaceRoot);
+  if (!fs.existsSync(stateFile)) return;
 
-  try {
-    const raw = fs.readFileSync(stateFile, "utf8");
-    const state = JSON.parse(raw);
-    const sessionJobs = (state.jobs || []).filter((j) => j.sessionId === sessionId);
-    if (sessionJobs.length === 0) return;
+  const state = loadState(workspaceRoot);
+  const sessionJobs = state.jobs.filter((j) => j.sessionId === sessionId);
+  if (sessionJobs.length === 0) return;
 
-    for (const job of sessionJobs) {
-      if (job.status === "running" || job.status === "queued") {
-        terminateProcess(job.pid);
-      }
+  for (const job of sessionJobs) {
+    if (job.status === "running" || job.status === "queued") {
+      terminateProcess(job.pid);
     }
-
-    state.jobs = state.jobs.filter((j) => j.sessionId !== sessionId);
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
-  } catch {
-    // State file unreadable — skip
-  } finally {
-    try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
   }
+
+  saveState(workspaceRoot, {
+    ...state,
+    jobs: state.jobs.filter((j) => j.sessionId !== sessionId),
+  });
 }
 
 function handleSessionStart(input) {
@@ -113,8 +95,9 @@ function handleSessionStart(input) {
 }
 
 function handleSessionEnd(input) {
+  const cwd = input.cwd || process.cwd();
   const sessionId = input.session_id || process.env[SESSION_ID_ENV];
-  cleanupAllSessionJobs(sessionId);
+  cleanupSessionJobs(cwd, sessionId);
 }
 
 function main() {
