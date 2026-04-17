@@ -29,12 +29,12 @@ Execution mode rules:
 
 Foreground flow:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" adversarial-review $ARGUMENTS --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" adversarial-review "$ARGUMENTS" --json
 ```
 Return the output verbatim. Do not fix any issues.
 
 Background flow:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" adversarial-review --background $ARGUMENTS --json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gemini-companion.mjs" adversarial-review --background "$ARGUMENTS" --json
 ```
 After launching: "Gemini adversarial review started in the background. Check `/gemini:status` for progress."
