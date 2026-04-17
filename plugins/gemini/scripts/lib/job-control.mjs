@@ -423,6 +423,17 @@ export function resolveCancelableJob(workspaceRoot, reference) {
   const active = jobs.filter(
     (j) => j.status === "queued" || j.status === "running"
   );
+  // Without an explicit reference, don't grab active jobs owned by other Claude sessions.
+  // Explicit job-id still matches across sessions for precise targeting.
+  if (!reference) {
+    const currentSession = getCurrentSessionId();
+    if (currentSession) {
+      return matchJobReference(
+        active.filter((j) => j.sessionId === currentSession),
+        reference
+      );
+    }
+  }
   return matchJobReference(active, reference);
 }
 
@@ -518,20 +529,19 @@ export function cancelJob(workspaceRoot, jobId) {
 
 /**
  * Find the latest completed task job with a geminiSessionId for resumption.
- * Scoped to the current Claude session to prevent cross-session thread leakage.
+ * Hard-scoped to the current Claude session — prevents implicit resume of
+ * another session's thread. Aligns with codex-plugin-cc PR #83.
  */
 export function resolveResumeCandidate(workspaceRoot) {
   const jobs = listJobs(workspaceRoot);
   const currentSession = getCurrentSessionId();
 
-  // Prefer current session, fall back to any session if none found
   let taskJobs = jobs
     .filter((j) => j.kind === "task" && j.status === "completed" && j.geminiSessionId)
     .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 
   if (currentSession) {
-    const sessionScoped = taskJobs.filter((j) => j.sessionId === currentSession);
-    if (sessionScoped.length > 0) taskJobs = sessionScoped;
+    taskJobs = taskJobs.filter((j) => j.sessionId === currentSession);
   }
 
   if (taskJobs.length === 0) return null;

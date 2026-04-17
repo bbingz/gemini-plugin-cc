@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Engram Integration
+- Add Engram sidecar writer: `writeEngramSidecar()` writes `{sessionId}.engram.json` alongside Gemini session files
+- Sidecar links Gemini CLI sessions back to parent Claude Code session via `GEMINI_COMPANION_SESSION_ID`
+- Project directory resolved from `~/.gemini/projects.json` (longest prefix match)
+- Integrated into both `callGemini()` (sync) and `callGeminiStreaming()` (async)
+- Fail-open: sidecar write errors never affect main flow
+
+## 0.5.1 (2026-04-18)
+
+Aligned with codex-plugin-cc v1.0.3. Two security/scope fixes surfaced by reviewing
+OpenAI's upstream patches against our parallel implementation.
+
+### Security
+- Quote `$ARGUMENTS` in all command `.md` shell invocations (ask/review/cancel/status/setup/result/adversarial-review). Unquoted `$ARGUMENTS` allowed shell-metacharacter injection via user input (e.g. `; rm -rf /`). Matches codex-plugin-cc PR #168.
+
+### Job Session Scope
+- `resolveCancelableJob` now scopes default (no job-id) target to the current Claude session via `CLAUDE_SESSION_ID`. Explicit `cancel <job-id>` still matches across sessions for precise targeting. Matches codex-plugin-cc PR #84.
+- `resolveResumeCandidate` switched from soft-scope (fallback to any session) to hard-scope (current session only). Prevents implicit resume of another Claude session's Gemini thread after crash/restart. Matches codex-plugin-cc PR #83.
+
 ## 0.5.0
 
 ### Streaming (Path A)
