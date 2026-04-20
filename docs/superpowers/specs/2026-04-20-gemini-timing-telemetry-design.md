@@ -1,44 +1,62 @@
-# Gemini Timing Telemetry — Design Spec
+# Gemini Timing Telemetry — Design Spec (v2)
 
 - **Date**: 2026-04-20
 - **Target version**: 0.6.0 (from 0.5.2)
-- **Scope**: Observability-first. Add fine-grained timing telemetry to Gemini plugin calls, persist history, and surface via a new `/gemini:timing` command with cross-plugin comparison against Codex.
-- **Non-goals**: Do not optimize performance yet. Data collected here will drive the next round of optimization decisions (CLI cold-start mitigation, model swap, prompt reduction, daemon mode).
+- **Revision**: v2 — revised after 3-way review (Codex / Gemini / Claude code-reviewer)
+- **Scope**: Observability-first for **streaming** calls (`task`, `ask`). Add fine-grained timing, persist global history, surface via new `/gemini:timing` command.
+- **Non-goals**: Do not optimize performance yet. Do not instrument synchronous `callGemini` (review) in this release — deferred to 0.6.1. Do not cross-compare against Codex — deferred to 0.6.1 (Codex lacks segment instrumentation; totals-only compare is low-signal).
 
 ## Motivation
 
-Users report that Gemini-delegated tasks feel slower than Codex-delegated tasks — with observed runs up to ~10 minutes. The current job tracking (`job-control.mjs`) only records coarse phase transitions (`queued → starting → running → done`) and first/last timestamps. It is impossible to attribute the 10-minute total to any specific cause:
+Users report Gemini-delegated tasks feel much slower than Codex-delegated tasks — observed up to ~10 minutes per task. Current job tracking records only coarse phase transitions and first/last timestamps. We cannot attribute that 10 minutes to any cause.
 
-1. CLI cold-start (Gemini CLI is re-spawned per invocation; Codex keeps a persistent app-server)
-2. Time-to-first-token (Gemini 3.1 Pro baseline 21–35s per vendor data)
-3. Token generation throughput
-4. Trailing close delay after final result event
+**Empirical evidence from the review of this spec itself**: the Gemini subagent reviewing v1 took 16m 6s, and its `per_model_usage` showed a silent Pro→Flash downgrade — 68K tokens billed to Pro, 1,014K tokens billed to Flash — while the `init` event reported only `gemini-3.1-pro-preview`. **The thing we need to measure is already distorting our own operations.** v2 explicitly handles this.
 
-Without data-driven attribution, any optimization is guessing. This spec adds the minimum reliable instrumentation to make the next decision informed.
+### Decomposition target
+
+Any 10-minute wall-clock should attributable to a union of these:
+
+- **CLI cold-start** (Node boot + `gemini` binary startup + config + extensions)
+- **Time-to-first-token** (network + model queueing + first inference)
+- **Generation time** (token output at steady state)
+- **Tool execution time** (mid-stream `tool_use` pauses — silently inflates `streamMs` if ignored)
+- **Internal retry delay** (CLI's `ModelAvailabilityService` silently retries 429/503/504)
+- **Reasoning-token time** (thoughts tokens are not in `output_token_count` — distorts tok/s)
+- **Silent model fallback** (Pro→Flash mid-request — `init.model` does not reflect reality)
+- **Tail close** (process teardown; expected near-zero; kept to falsify)
 
 ## Data Model
 
-Each job emits a `timing` object on completion (success OR failure OR timeout — failures are the most important case to instrument, never skip).
-
-### Schema (per job)
+### Schema (per streaming job)
 
 ```json
 {
   "timing": {
-    "spawnedAt":     "2026-04-20T12:34:56.789Z",
-    "firstEventMs":  1830,
-    "ttftMs":        18420,
-    "streamMs":      432150,
-    "tailMs":        210,
-    "totalMs":       452610,
-    "model":         "gemini-3-pro-preview",
+    "spawnedAt":      "2026-04-20T12:34:56.789Z",
+    "firstEventMs":   1830,
+    "ttftMs":         18420,
+    "streamMs":       220000,
+    "toolMs":         180000,
+    "retryMs":        32000,
+    "tailMs":         210,
+    "totalMs":        452460,
+    "requestedModel": "gemini-3-pro-preview",
+    "usage": [
+      { "model": "gemini-3.1-pro-preview",   "input": 12400, "output": 3200,  "thoughts": 900 },
+      { "model": "gemini-3-flash-preview",   "input": 48000, "output": 7040,  "thoughts": 0   }
+    ],
     "promptBytes":   12034,
     "responseBytes": 28516,
-    "inputTokens":   3180,
-    "outputTokens":  7042,
     "tokensPerSec":  16.3,
     "exitCode":      0,
-    "timedOut":      false
+    "terminationReason": "exit",
+    "timedOut":      false,
+    "coldStartPhases": [
+      { "phase": "runtime",   "ms": 420 },
+      { "phase": "config",    "ms": 180 },
+      { "phase": "extensions","ms": 910 },
+      { "phase": "other",     "ms": 320 }
+    ]
   }
 }
 ```
@@ -47,186 +65,281 @@ Each job emits a `timing` object on completion (success OR failure OR timeout �
 
 | Field | Definition | Captures |
 |---|---|---|
-| `firstEventMs` | `t_firstEvent - t_spawn` | CLI cold-start cost |
-| `ttftMs` | `t_firstToken - t_firstEvent` | Model latency to first token |
-| `streamMs` | `t_lastToken - t_firstToken` | Generation duration |
-| `tailMs` | `t_close - t_lastToken` | Trailing teardown |
-| `totalMs` | `t_close - t_spawn` | End-to-end wall clock |
+| `firstEventMs` | `t_firstEvent - t_spawn` | CLI cold-start cost (detail in `coldStartPhases`) |
+| `ttftMs` | `t_firstToken - t_firstEvent` | Model latency to first token (**excludes** `retryMs`) |
+| `streamMs` | `t_lastToken - t_firstToken − toolMs − retryMs` | **Pure** generation duration |
+| `toolMs` | Σ (`t_tool_result − t_tool_use`) over all tool cycles | Time the model waited on tool execution |
+| `retryMs` | Σ internal-retry delays seen as non-fatal `{type:"error"}` events | CLI-internal retries (invisible to caller otherwise) |
+| `tailMs` | `t_close - t_lastToken` | Trailing teardown (expected near-zero; tracked to falsify) |
+| `totalMs` | `t_close - t_spawn` | End-to-end wall clock. **Invariant**: `firstEventMs + ttftMs + streamMs + toolMs + retryMs + tailMs == totalMs` (validated in tests) |
 
-Where:
+### Event boundaries (NDJSON)
 
 - `t_spawn`: immediately before `spawn("gemini", args, ...)`
-- `t_firstEvent`: first successfully parsed NDJSON line from stdout (any event type)
-- `t_firstToken`: first NDJSON event matching `{type: "message", role: "assistant", content: <non-empty>}`
-- `t_lastToken`: last such event seen
+- `t_firstEvent`: first NDJSON line that parses (any type)
+- `t_firstToken`: first `{type:"message", role:"assistant", content:<non-empty>}` event
+- `t_lastToken`: last such event
+- `t_tool_use` / `t_tool_result`: paired `{type:"tool_use"}` / `{type:"tool_result"}` boundaries; collect durations into `toolMs` bucket
+- `{type:"error"}` (non-fatal, no close): treat as retry marker; start retry window, end on next non-error event. Accumulate into `retryMs`
 - `t_close`: inside `child.on("close", ...)` handler
 
-### Degraded capture for failures and sync calls
+If an event shape is missing (e.g., CLI version emits `tool_use` under a different key), segment accumulators stay at 0 and `streamMs` absorbs the time. Log a one-time debug line per shape variant so we learn the schema.
 
-- **Timeout**: capture whatever segments were reached; nulls for the rest. `timedOut: true`.
-- **Exit non-zero before first event**: only `firstEventMs` may be null; `totalMs` still recorded.
-- **Synchronous `callGemini` (review)**: only `totalMs`, `model`, `promptBytes`, `responseBytes`, `inputTokens`, `outputTokens`, `exitCode`, `timedOut` are populated. Streaming-only fields (`firstEventMs`, `ttftMs`, `streamMs`, `tailMs`, `tokensPerSec`) are `null`. Rationale: `-o json` sync mode has no NDJSON stream to segment.
+### Model attribution — authoritative source
+
+**`requestedModel`** comes from the `init` event. **`usage[]`** comes from the `result` event's `per_model_usage` (or equivalent) — this is the authoritative record of what actually ran. A silent Pro→Flash fallback will show as two entries in `usage`; `init.model` will look fine but will be contradicted by `usage`.
 
 ### Token source
 
-- Prefer values from Gemini's own `result` event `stats.tokens` (when present). Field path may be `stats.tokens.input` / `stats.tokens.output` or `stats.tokens.promptTokens` / `stats.tokens.candidatesTokens` depending on CLI version.
-- If neither path is present: fall back to byte-based estimate `Math.round(bytes / 4)` and mark the field with a sibling `inputTokensEstimated: true` / `outputTokensEstimated: true` so we never silently show fake numbers.
-- `tokensPerSec` is computed only when `outputTokens` is real AND `streamMs > 0`; otherwise null.
+Read from the final `result` event's `stats` block using the real field names:
+
+- `input_token_count`
+- `output_token_count`
+- `thoughts_token_count` (reasoning tokens)
+- `tool_token_count` (optional)
+
+When `per_model_usage` is present, prefer its per-model breakdown and populate `usage[]`. Otherwise produce a single-element `usage[]` keyed to `requestedModel`.
+
+**`tokensPerSec`** = `Σ(output_token_count + thoughts_token_count) / (streamMs / 1000)`. Rationale: thoughts tokens consume generation time; excluding them makes Pro look artificially slow on reasoning-heavy tasks.
+
+Fallback: if all token fields missing (CLI schema drift), emit `tokensPerSec: null` and a debug log. **Never** byte-estimate silently — false precision is worse than null.
+
+### Cold-start phases (free bonus)
+
+Set `GEMINI_TELEMETRY_ENABLED=1` in the child env when spawning. The CLI emits a `gemini_cli.startup_stats` event with `phases[]`. Copy verbatim into `coldStartPhases`. If the env var is rejected by the user's CLI version (no event seen), leave the field absent — `firstEventMs` alone is still correct.
+
+### Degraded capture — explicit cases
+
+| Terminal state | What's captured | What's null |
+|---|---|---|
+| Exit code 0 | Everything | Nothing |
+| Timeout (`timedOut: true`) | Whatever segments reached | Remaining segments, `exitCode` |
+| Exit non-zero with events | Reached segments | Remaining segments |
+| Exit before first event | `totalMs` only | Everything else |
+| Cancelled (SIGINT/SIGTERM) | Everything reached | Final segments if interrupted mid-stream. `terminationReason: "signal"`, record signal name (`"SIGINT"`, `"SIGTERM"`) |
+
+`terminationReason` discriminator: `"exit"` | `"timeout"` | `"signal"` | `"error"`.
+
+### Synchronous `callGemini` (review / adversarial-review)
+
+**NOT instrumented in 0.6.0.** `-o json` emits no NDJSON stream, so we cannot segment without duplicating work already tracked elsewhere. Deferred to 0.6.1 where we'll add wall-time `totalMs` only.
+
+Resolves the v1 contradiction between the data model and Phase 6.
 
 ## Storage
 
-### Per-job (short-lived)
+### Per-job (short-lived) — aligned with actual state layout
 
-Extend each job record in `~/.claude/plugins/gemini/state/<workspace>/jobs.json` with the `timing` object. Old records without this field render as `—` in UI — no migration required.
+The existing layout is `~/.claude/plugins/gemini/state/<workspace>/state.json` (job index) plus `~/.claude/plugins/gemini/state/<workspace>/jobs/<jobId>.json` (per-job result envelope). **v2 correction**: v1 incorrectly called this a single `jobs.json`.
+
+- **Write**: the `timing` object is added to the per-job envelope in `jobs/<jobId>.json`, produced by the streaming worker on terminal transition. Existing `writeJobFile()` already handles this envelope — just include `timing` alongside `result`.
+- **Read**: `/gemini:result --json` already returns `{ job, result }`. Add `timing` as a sibling (`{ job, result, timing }`). `enrichJob()` already runs on `state.json` records; when the summary line needs timing, it reads from the envelope file.
+- **Legacy**: jobs completed before 0.6.0 have no envelope field; render `—`.
 
 ### Global history (long-lived)
 
-**Path**: `~/.claude/plugins/gemini/timings.ndjson` (global, NOT per-workspace — user operates Gemini across multiple repos; trend analysis needs the union).
+**Path**: `~/.claude/plugins/gemini/timings.ndjson`. Global across workspaces — trend analysis needs the union.
 
-**Format**: One JSON object per line, appended on job completion:
+**Concurrency — dedicated lock, not state.mjs's lock**
 
-```json
-{"ts":"2026-04-20T12:42:29.399Z","jobId":"gt-abc123","kind":"task","workspace":"/Users/bing/-Code-/gemini-plugin-cc","timing":{...}}
-```
+The existing `state.mjs` lock is per-state-file and, on retry exhaustion, bypasses the lock to avoid deadlock (`state.mjs:107-149`). That bypass is acceptable for its use case but **unsafe for append-then-trim on a shared global file**. Introduce a dedicated lock:
 
-**Concurrency**: Reuse `state.mjs` file-locking pattern — multiple Claude sessions across workspaces may append simultaneously.
+- Lock file: `~/.claude/plugins/gemini/timings.ndjson.lock`
+- Acquisition: `fs.openSync(lockPath, "wx")`; on `EEXIST` retry with backoff for up to 10 seconds, then give up and **drop the record** (log to stderr of the worker log; do not block job completion). Dropped records are a minor analytics gap; a hung job completion is a user-visible failure.
+- Release: unlink after write.
 
-**Size management**: Append-only; no time-based rotation. When file exceeds **10 MB** (checked on append), trim the oldest half (keep the newest 50%, rewrite atomically via temp file + rename). Rationale: 1 job record ≈ 300 bytes, so 10 MB ≈ 35k jobs — plenty for trend analysis, trim cost is bounded and rare.
+**Append integrity**: before appending, check the last byte of the file. If it is not `\n` (prior crash left a partial line), prepend `\n` to the new record. Prevents compound corruption.
 
-**Corruption tolerance**: Reader skips any line that fails `JSON.parse`. One bad line never breaks history analysis.
+**Read tolerance**: consumers parse line-by-line, `try { JSON.parse }`, skip bad lines silently.
+
+**Size management**: on each append, check file size. If > 10 MB (≈ 35k records at ~300 bytes each), trim: read all, parse-and-filter to valid lines, keep newest 50%, write to `timings.ndjson.tmp`, rename. Rename is atomic on POSIX. Trim happens under the same dedicated lock as append.
 
 ## UI Surface
 
 ### 1. `/gemini:status` (existing, enriched)
 
-Human-readable view adds one summary line per row:
+Human-readable view adds one summary line per row when `timing` is present:
 
 ```
 gt-abc123 · task · done · 7m 32s
-  cold 1.8s · ttft 18.4s · gen 7m 12s · tail 0.2s · 16 tok/s
+  cold 1.8s · ttft 18.4s · gen 3m 40s · tool 3m 0s · retry 32s · 16 tok/s
 ```
 
-If `timing` is missing (legacy job), show `—` in place of the summary line. Never throw.
+Legacy jobs render `—`. Never throw.
 
 ### 2. `/gemini:result --json` (existing, enriched)
 
-The JSON payload gains a top-level `timing` field (null for legacy jobs). No change to the existing schema otherwise.
+Returns `{ job, result, timing }`. `timing: null` for legacy jobs.
 
 ### 3. `/gemini:timing` (new command)
 
-Three invocation modes — mutually exclusive flags:
+Three mutually-exclusive invocation modes. **Combining modes returns a usage error.**
 
 #### a) `/gemini:timing <job-id>` — single-job detail
 
 ```
 Job gt-abc123 · task · done
-  Prompt    12.0 KB → 3,180 tokens
-  Response  28.5 KB ← 7,042 tokens
-  Model     gemini-3-pro-preview
+  Prompt     12.0 KB
+  Response   28.5 KB
+  Requested  gemini-3-pro-preview
+  Actual     gemini-3.1-pro-preview  (68K tok)
+             gemini-3-flash-preview  (1014K tok)   ⚠ silent fallback
 
-  cold   ████                    1.8s   ( 0.4%)
-  ttft   ██████████             18.4s   ( 4.1%)
-  gen    ███████████████████   432.1s   (95.5%)
-  tail   ▏                       0.2s   ( 0.0%)
-  ─────────────────────────────────────
-  total                         452.6s    100%
+  cold     ▍                     1.8s   ( 0.4%)
+  ttft     ██                   18.4s   ( 4.1%)
+  gen      █████████           220.0s   (48.6%)
+  tool     ████████            180.0s   (39.8%)
+  retry    ██                   32.0s   ( 7.1%)
+  tail     ▏                     0.2s   ( 0.0%)
+  ────────────────────────────────────
+  total                        452.4s    100%
 
-  Throughput: 16.3 tokens/sec
+  Throughput: 16.3 tok/s  (includes thoughts)
+  Cold-start breakdown: runtime 0.4s · config 0.2s · extensions 0.9s · other 0.3s
 ```
 
-Bars: 30-column width, proportional to segment duration. Characters: `█▉▊▋▌▍▎▏` for sub-character precision. Skip segments that are null.
+Bars: 20-column width, proportional. Null segments omitted. Silent-fallback warning when `usage[]` has >1 entry.
 
-#### b) `/gemini:timing --history [--kind K] [--last N]` — table
+**JSON shape** (`--json`):
+```json
+{
+  "job": { "id": "gt-abc123", "kind": "task", "status": "done" },
+  "timing": { /* full schema above */ },
+  "fallback": true
+}
+```
 
-Defaults: `--last 20`, all kinds. Columns: `id · kind · total · cold · ttft · gen · tok/s · completedAt`.
+#### b) `/gemini:timing --history [--kind K] [--last N] [--since ISO]` — table
 
-#### c) `/gemini:timing --stats [--kind K]` — aggregate
+Defaults: `--last 20`, all kinds, no time filter. Columns: `id · kind · total · cold · ttft · gen · tool · retry · tok/s · fallback · completedAt`.
+
+**JSON shape**:
+```json
+{
+  "rows": [
+    { "jobId": "gt-abc123", "kind": "task", "completedAt": "...", "timing": {...}, "fallback": true }
+  ],
+  "count": 20
+}
+```
+
+#### c) `/gemini:timing --stats [--kind K] [--since ISO]` — aggregate
 
 ```
 task (n=34, window=last 30 days)
-                  cold        ttft        gen         total
-  p50             1.9s        19.2s       2m 10s      2m 35s
-  p95             3.1s        42.0s       8m 15s      9m 03s
-  p99             3.8s        58.0s       9m 40s      9m 58s
-  slowest         gt-xyz789 · 9m 48s · prompt=48KB · out=12k tok
+                  cold      ttft      gen       tool      retry     total
+  p50             1.9s      19.2s     2m 10s    0s        0s        2m 35s
+  p95             3.1s      42.0s     8m 15s    4m 00s    1m 20s    9m 03s
+  p99 (n<100)     —         —         —         —         —         —
+  slowest         gt-xyz789 · 9m 48s · fallback · prompt=48KB · out=12k tok
+  fallback rate   23.5% (8/34)
 ```
 
-Percentile calculation: sort each column independently; use nearest-rank method (no interpolation) for simplicity.
+**Percentile rules**:
+- p50 always shown
+- p95 suppressed (`—`) when n < 20
+- p99 suppressed when n < 100
+- Null segments excluded from that column's sort
+- Nearest-rank method, no interpolation
 
 Time window default: last 30 days. Override via `--since <iso-date>`.
 
-#### d) `/gemini:timing --compare codex [--kind K]` — cross-plugin comparison (C1)
-
+**JSON shape**:
+```json
+{
+  "kind": "task",
+  "n": 34,
+  "since": "2026-03-21T00:00:00Z",
+  "percentiles": {
+    "p50": { "cold": 1900, "ttft": 19200, "gen": 130000, "tool": 0, "retry": 0, "total": 155000 },
+    "p95": { ... },
+    "p99": null
+  },
+  "slowest": { "jobId": "gt-xyz789", "totalMs": 588000, "fallback": true },
+  "fallbackRate": 0.235
+}
 ```
-task · last 30 days
-                   Gemini (n=34)      Codex (n=52)
-  p50 total        2m 35s             34s
-  p95 total        9m 03s             2m 10s
-  ratio (p50)      4.6x slower
-  ratio (p95)      4.2x slower
-```
-
-**Codex data source**: Read `~/.claude/plugins/codex/state/*/jobs.json` (or wherever Codex stores state — verify in implementation). Only the job-level elapsed time is available (Codex does not currently instrument segments — tracked for a future PR). Compare totals only.
-
-**Graceful degradation**: If Codex state is missing or the directory does not exist, print `Codex history not detected — install & run Codex plugin to enable comparison.` Exit 0.
-
-### 4. `/gemini:timing --json` flag
-
-All three modes accept `--json` to emit machine-readable output for Claude to consume.
 
 ## Files to Change
 
 | File | Change | Est. lines |
 |---|---|---|
-| `plugins/gemini/scripts/lib/gemini.mjs` | Instrument `callGemini` (partial) and `callGeminiStreaming` (full); return `timing` object; read `stats.tokens` with fallback | +70 |
-| `plugins/gemini/scripts/lib/job-control.mjs` | Worker persists `timing` to `jobs.json`; appends to global ndjson | +40 |
-| `plugins/gemini/scripts/lib/state.mjs` | `appendTimingHistory()`, `readTimingHistory()`, trim-on-threshold | +35 |
-| `plugins/gemini/scripts/lib/render.mjs` | Status view summary line | +15 |
-| `plugins/gemini/scripts/gemini-companion.mjs` | Route `timing` subcommand | +30 |
-| `plugins/gemini/scripts/lib/timing.mjs` | **new**: percentiles, bar rendering, history filtering | +90 |
-| `plugins/gemini/scripts/lib/codex-compare.mjs` | **new**: read Codex state, compute ratio | +50 |
-| `plugins/gemini/commands/timing.md` | **new**: slash command frontmatter + usage | new file |
+| `plugins/gemini/scripts/lib/gemini.mjs` | Instrument `callGeminiStreaming` only; return `timing`; parse `tool_use`/`tool_result`/non-fatal `error` events; read `per_model_usage` + real token fields; inject `GEMINI_TELEMETRY_ENABLED=1` and capture `startup_stats` | +90 |
+| `plugins/gemini/scripts/lib/job-control.mjs` | Worker persists `timing` into per-job envelope; calls `appendTimingHistory()` | +25 |
+| `plugins/gemini/scripts/lib/state.mjs` | `appendTimingHistory()`, `readTimingHistory()`, dedicated lock + trim + partial-line repair | +50 |
+| `plugins/gemini/scripts/lib/render.mjs` | `/gemini:status` summary line; respects `timing === null` legacy path | +20 |
+| `plugins/gemini/scripts/gemini-companion.mjs` | Route `timing` subcommand; reject combined flags | +30 |
+| `plugins/gemini/scripts/lib/timing.mjs` | **new**: percentiles with small-n suppression, bar rendering, history filter/aggregate, fallback detection | +100 |
+| `plugins/gemini/commands/timing.md` | **new**: frontmatter matching existing style (`disable-model-invocation: true`, `allowed-tools: Bash(node:*)`), usage | new file |
 | `plugins/gemini/CHANGELOG.md` | 0.6.0 entry | — |
-| `plugins/gemini/.claude-plugin/plugin.json` | Version bump 0.5.2 → 0.6.0 | 1 |
-| Root `CHANGELOG.md` | Append 0.6.0 entry | — |
+| `plugins/gemini/.claude-plugin/plugin.json` | 0.5.2 → 0.6.0 | 1 |
+| Root `CHANGELOG.md` | Append 0.6.0 | — |
 
-**Total**: ~330 lines of code + 1 new command file + 2 new lib files.
+**Total**: ~315 lines. **(v1 was ~330 lines with Codex-compare; v2 trades codex-compare for `toolMs`/`retryMs`/`per_model_usage`/telemetry-phases logic — smaller and higher-signal.)**
 
 ## Implementation Phases
 
-Each phase is independently testable. Not a PR boundary — all merged together.
+1. **Capture layer** — instrument `callGeminiStreaming`: timestamps, NDJSON dispatch for tool/retry/startup_stats events, token path with `per_model_usage`. Tests: happy path, timeout, cancelled (SIGINT), one-tool-call path, silent-fallback fixture, missing `stats` fixture. **Assert the segment-sum invariant.**
+2. **Storage layer** — per-job envelope extension + global ndjson with dedicated lock, trim, partial-line repair. Tests: two concurrent appenders, trim on 10MB fixture, corrupted-last-line fixture, disk-full simulated via mock `fs.writeSync`.
+3. **Render layer** — status summary + `/gemini:timing <id>` detail view. Tests: legacy job (timing absent), fallback warning rendering, null-segment omission.
+4. **Aggregate layer** — `--history` + `--stats` with small-n suppression. Tests: n=5/n=19/n=20/n=99/n=100 boundaries; fallback rate math.
 
-1. **Capture layer** — instrument `callGemini` + `callGeminiStreaming`; unit-verify timing shape on happy path, failure path, timeout path
-2. **Storage layer** — extend `jobs.json`; append to ndjson with locking; trim on threshold; run 2–3 real tasks to verify
-3. **Render layer** — `/gemini:status` summary line; `/gemini:timing <id>` single-job view
-4. **Aggregate layer** — `--history` and `--stats`
-5. **Compare layer** — `--compare codex` with graceful degradation
-6. (Optional, in-scope) Degraded capture for sync `callGemini` (review/adversarial-review)
+Each phase is independently testable; all merged together.
 
 ## Compatibility & Risk
 
-- **Schema additivity**: `timing` is a new field; legacy job records (absent or partial) render as `—`. No migration.
-- **File lock contention**: The global ndjson is written from every workspace's worker. Reuse `state.mjs` lock retry logic. Append is a single write syscall so contention window is small.
-- **Gemini CLI schema drift**: `stats.tokens.*` field names are not formally documented. Check multiple known paths; fall back to byte estimate when all fail. Never silently fabricate token numbers.
-- **Codex state path drift**: If Codex plugin reorganizes its state layout, `--compare codex` gracefully prints "not detected" instead of crashing.
-- **Performance overhead**: 5 `Date.now()` calls + 1 ndjson append per job = negligible (< 1 ms).
-- **Privacy**: `prompt` content is NOT stored in timing history; only byte size. Consistent with existing `job.prompt` truncation to 200 chars.
+- **Schema additivity**: `timing` is a new field; legacy jobs render `—`.
+- **NDJSON schema drift (Gemini CLI)**: `tool_use`/`tool_result`/`error` event shapes aren't formally frozen. If a shape changes, segment accumulators stay at 0 and `streamMs` absorbs the time — degraded, not broken. Emit one debug log per unknown variant.
+- **Invariant drift**: the `firstEventMs + ttftMs + streamMs + toolMs + retryMs + tailMs == totalMs` check runs only in tests (asserts with fixtures). At runtime, we record what we saw; a sum mismatch is logged but not fatal.
+- **Token schema drift**: if `input_token_count` et al. vanish in a future CLI release, `tokensPerSec` becomes null. Never fabricate.
+- **Lock contention across workspaces**: dedicated lock at global path. 10s acquire budget before dropping the record. Worker log shows drop reason.
+- **Disk full**: ndjson append failure is caught; record is dropped with a log line; job still completes successfully.
+- **`GEMINI_TELEMETRY_ENABLED=1`**: If the user has opted out via config, the env var is harmless (CLI ignores). If it enables telemetry beyond local stdout in some versions, verify during implementation and drop the env var if it causes network side-effects.
+- **Privacy**: prompt/response content is NOT stored. Only byte size.
+- **Performance**: 5 `Date.now()` calls + event dispatch + 1 ndjson append per job. < 2 ms overhead.
 
-## Out of Scope (deferred)
+## Out of Scope (explicit, deferred to 0.6.1)
 
-- **Codex segment-level instrumentation**: A future PR to Codex plugin would enable true side-by-side breakdown. Tracked separately.
-- **Performance optimizations**: This spec ships only instrumentation. Optimization strategies (model swap, prompt compaction, CLI daemon mode adoption) are decided after the first weeks of data.
-- **Live per-token rate during streaming**: Current streaming worker logs content in bulk; computing mid-stream tokens/sec requires additional parsing. Deferred unless data shows it's needed.
-- **Historical import / backfill**: Jobs completed before 0.6.0 have no timing data. Acceptable — new data accumulates quickly.
+- Sync `callGemini` timing (wall-time only). Low traffic; adds noise to the v1 schema.
+- Cross-plugin comparison `--compare codex`. Codex has no segment timing today; totals-only comparison was low-signal. Revisit after Codex plugin gains equivalent instrumentation.
+- Live per-token rate during streaming.
+- Historical backfill for pre-0.6.0 jobs.
 
 ## Success Criteria
 
 After one week of real use, we should be able to answer:
 
-1. For a typical task job, what is the median (p50) and tail (p95) breakdown across cold / ttft / gen / tail?
-2. What fraction of total time is CLI cold-start vs. model latency vs. generation?
-3. How much slower is Gemini than Codex at p50 and p95 for equivalent task kinds?
-4. Is there a clear "slow" model fingerprint (e.g., `modelSteering` silently routing to a degraded variant)?
-5. Do failed/timeout jobs cluster in any particular segment (e.g., all timeouts hit during `streamMs`, suggesting a specific generation issue)?
+1. For p50 and p95 `task` jobs, what is the share of cold / ttft / gen / tool / retry / tail?
+2. How often (% of jobs) does silent Pro→Flash fallback occur? On which jobs (prompt size / duration buckets)?
+3. What fraction of apparent latency is internal-retry delay masquerading as model slowness?
+4. What fraction of apparent generation time is actually tool execution?
+5. Do failed/timeout jobs cluster in a specific segment?
+6. Is the cold-start breakdown (runtime / config / extensions) actionable — i.e., is one phase dominant and optimizable?
 
 Only after these answers arrive do we design the optimization phase.
+
+---
+
+## Revision notes (v1 → v2)
+
+**Blockers fixed**:
+- Storage format realigned to `state.json + jobs/*.json` (Codex B1)
+- Global ndjson now uses a dedicated lock, not state.mjs's bypass-prone one (Codex B2)
+- Sync `callGemini` timing explicitly deferred to 0.6.1 — schema is streaming-only (Claude B2)
+- `--compare codex` cut, `codex-compare.mjs` dropped (Claude B1 / Codex N6)
+- Token field names corrected to `input_token_count` / `output_token_count` / `thoughts_token_count` (Gemini G4)
+- Model attribution authoritative source is `result.per_model_usage`, not `init.model` (Gemini G3)
+
+**Should-fix incorporated**:
+- New `toolMs` segment — mid-stream tool execution no longer silently inflates `streamMs` (Gemini G1)
+- New `retryMs` segment — internal 429/503/504 retries visible (Gemini G2)
+- `tokensPerSec` includes `thoughts_token_count` (Gemini G6)
+- `coldStartPhases[]` via `GEMINI_TELEMETRY_ENABLED=1` (Gemini G5, free value)
+- Append-path partial-line repair before write (Claude S4)
+- Percentile suppression at n<20 (p95) and n<100 (p99) (Claude S2)
+- JSON shape examples for all modes (Claude S6)
+- Cancel path timing semantics via `terminationReason` discriminator (Codex S4)
+
+**Scope discipline**:
+- ~330 → ~315 lines, but net signal density up (traded `codex-compare.mjs` for tool/retry/per_model accounting)
+- 5 implementation phases → 4
