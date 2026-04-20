@@ -1,6 +1,6 @@
 {
   "name": "gemini",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Use Gemini from Claude Code to review code or delegate tasks. Streaming support, task runtime, thread resumption.",
   "author": {
     "name": "bing"

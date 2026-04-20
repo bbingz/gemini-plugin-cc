@@ -4,7 +4,7 @@ Claude Code 插件，将 Google Gemini CLI 集成为按需调用的子代理。~
 
 ## 项目状态
 
-- **版本**: 0.5.1 (streaming + task runtime + structured review + codex-aligned hardening)
+- **版本**: 0.5.2 (engram sidecar + modelSteering guard + rescue Agent routing)
 - **GitHub**: https://github.com/bbingz/gemini-plugin-cc
 - **安装**: `claude plugin marketplace add bbingz/gemini-plugin-cc && claude plugin install gemini`
 - **Codex 对齐**: ~95% (剩余 ~5% 是 CLI 冷启动开销，等 Google daemon mode PR)

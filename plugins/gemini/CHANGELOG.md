@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 (2026-04-20)
 
 ### Aligned with codex-plugin-cc v1.0.4 (PR #234/#235)
 - `commands/rescue.md`: route through `Agent` tool explicitly instead of relying on subagent fork
