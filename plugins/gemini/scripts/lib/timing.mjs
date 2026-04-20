@@ -258,3 +258,51 @@ export function percentile(values, p) {
   const idx = Math.max(0, Math.min(sorted.length - 1, rank - 1));
   return sorted[idx];
 }
+
+const PERCENTILE_CUTOFFS = {
+  p50: 1,
+  p95: 20,
+  p99: 100,
+};
+
+export function computeAggregateStats(records) {
+  const n = records.length;
+  const pick = (key) => records.map((r) => r.timing?.[key]);
+  const allPercentiles = ["p50", "p95", "p99"];
+  const metrics = ["firstEventMs", "ttftMs", "streamMs", "toolMs", "retryMs", "totalMs"];
+
+  const percentiles = {};
+  for (const p of allPercentiles) {
+    if (n < PERCENTILE_CUTOFFS[p]) {
+      percentiles[p] = null;
+      continue;
+    }
+    const row = {};
+    for (const m of metrics) {
+      row[m] = percentile(pick(m), Number(p.slice(1)) / 100);
+    }
+    percentiles[p] = row;
+  }
+
+  // Slowest
+  let slowest = null;
+  for (const r of records) {
+    const total = r.timing?.totalMs || 0;
+    if (!slowest || total > slowest.totalMs) {
+      slowest = {
+        jobId: r.jobId || r.job?.id,
+        totalMs: total,
+        fallback: Array.isArray(r.timing?.usage) && r.timing.usage.length > 1,
+      };
+    }
+  }
+
+  // Fallback rate
+  let fallbackCount = 0;
+  for (const r of records) {
+    if (Array.isArray(r.timing?.usage) && r.timing.usage.length > 1) fallbackCount++;
+  }
+  const fallbackRate = n > 0 ? Math.round((fallbackCount / n) * 1000) / 1000 : 0;
+
+  return { n, percentiles, slowest, fallbackRate };
+}
