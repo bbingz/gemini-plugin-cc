@@ -80,7 +80,7 @@ test("retry before first token is subtracted from ttftMs", () => {
   assert.equal(t.ttftMs, 200);    // 400 - 200
 });
 
-test("per_model_usage populates usage[] and drives tokensPerSec", () => {
+test("stats.models object populates usage[] and drives tokensPerSec", () => {
   const acc = new TimingAccumulator({ spawnedAt: 0 });
   acc.setRequestedModel("gemini-3-pro-preview");
   acc.onFirstEvent(100);
@@ -88,10 +88,10 @@ test("per_model_usage populates usage[] and drives tokensPerSec", () => {
   acc.onLastToken(2200);          // streamMs = 2000 ms = 2s
   acc.onResult({
     stats: {
-      per_model_usage: [
-        { model: "gemini-3.1-pro-preview",   input_token_count: 100, output_token_count: 50,  thoughts_token_count: 20 },
-        { model: "gemini-3-flash-preview",   input_token_count: 200, output_token_count: 150, thoughts_token_count: 30 },
-      ],
+      models: {
+        "gemini-3.1-pro-preview": { input_tokens: 100, output_tokens: 50,  thoughts_token_count: 20 },
+        "gemini-3-flash-preview": { input_tokens: 200, output_tokens: 150, thoughts_token_count: 30 },
+      },
     },
   });
   acc.onClose(2210, { exitCode: 0 });
@@ -104,14 +104,14 @@ test("per_model_usage populates usage[] and drives tokensPerSec", () => {
   assert.equal(t.tokensPerSec, 125);
 });
 
-test("flat stats fallback when no per_model_usage", () => {
+test("flat stats fallback when no stats.models", () => {
   const acc = new TimingAccumulator({ spawnedAt: 0 });
   acc.setRequestedModel("gemini-3-flash-preview");
   acc.onFirstEvent(100);
   acc.onFirstToken(200);
   acc.onLastToken(1200);          // 1s stream
   acc.onResult({
-    stats: { input_token_count: 100, output_token_count: 200, thoughts_token_count: 50 },
+    stats: { input_tokens: 100, output_tokens: 200 },
   });
   acc.onClose(1210, { exitCode: 0 });
 
@@ -119,7 +119,7 @@ test("flat stats fallback when no per_model_usage", () => {
   assert.equal(t.usage.length, 1);
   assert.equal(t.usage[0].model, "gemini-3-flash-preview");
   assert.equal(t.usage[0].output, 200);
-  assert.equal(t.tokensPerSec, 250);   // (200+50) / 1
+  assert.equal(t.tokensPerSec, 200);   // (200+0) / 1
 });
 
 test("missing token fields leave tokensPerSec null", () => {
@@ -222,8 +222,8 @@ test("onResult is idempotent — first call wins, second is ignored", () => {
   acc.onFirstEvent(100);
   acc.onFirstToken(200);
   acc.onLastToken(1200);
-  acc.onResult({ stats: { input_token_count: 100, output_token_count: 200, thoughts_token_count: 0 } });
-  acc.onResult({ stats: { input_token_count: 9999, output_token_count: 9999, thoughts_token_count: 9999 } });
+  acc.onResult({ stats: { input_tokens: 100, output_tokens: 200 } });
+  acc.onResult({ stats: { input_tokens: 9999, output_tokens: 9999 } });
   acc.onClose(1210, { exitCode: 0 });
 
   const t = acc.build();
@@ -252,4 +252,22 @@ test("invariantOk is null on non-zero exit", () => {
   acc.onFirstEvent(100);
   acc.onClose(200, { exitCode: 1 });
   assert.equal(acc.build().invariantOk, null);
+});
+
+test("setRequestedModel is first-wins (protects intent from init.model overwrite)", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.setRequestedModel("gemini-3-pro-preview");
+  acc.setRequestedModel("gemini-3-flash-preview");  // CLI's init.model override attempt
+  assert.equal(acc.build().requestedModel, "gemini-3-pro-preview");
+});
+
+test("onClose flushes an open retry window into retryMs", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(500);
+  acc.onRetryStart(600);
+  acc.onClose(900, { exitCode: 0 });  // retry was still open at close — flushed to retryMs=300
+  const t = acc.build();
+  assert.equal(t.retryMs, 300);
 });

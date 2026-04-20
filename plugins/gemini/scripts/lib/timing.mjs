@@ -29,6 +29,10 @@ export class TimingAccumulator {
   }
 
   onClose(t = Date.now(), { exitCode = 0, timedOut = false, signal = null } = {}) {
+    // Flush an in-flight retry window (otherwise retry time is lost to tail/other)
+    if (this._retryStart != null) {
+      this.onRetryEnd(t);
+    }
     this._t.close = t;
     this._termination = {
       reason: timedOut ? "timeout" : signal ? "signal" : exitCode !== 0 ? "error" : "exit",
@@ -59,28 +63,34 @@ export class TimingAccumulator {
   }
 
   setRequestedModel(m) {
-    this._requestedModel = m || null;
+    if (this._requestedModel) return;  // first-wins
+    if (m) this._requestedModel = m;
   }
 
   onResult(resultEvent) {
-    if (this._usage) return;   // first-wins idempotence
+    if (this._usage) return;  // first-wins idempotence
     const stats = resultEvent?.stats || {};
-    if (Array.isArray(stats.per_model_usage) && stats.per_model_usage.length > 0) {
-      this._usage = stats.per_model_usage.map((u) => ({
-        model: u.model ?? "unknown",
-        input: u.input_token_count ?? 0,
-        output: u.output_token_count ?? 0,
-        thoughts: u.thoughts_token_count ?? 0,
-      }));
-    } else if (
-      stats.input_token_count != null ||
-      stats.output_token_count != null ||
-      stats.thoughts_token_count != null
-    ) {
+
+    // Preferred: stats.models is an object keyed by model name
+    if (stats.models && typeof stats.models === "object" && !Array.isArray(stats.models)) {
+      const entries = Object.entries(stats.models);
+      if (entries.length > 0) {
+        this._usage = entries.map(([modelName, m]) => ({
+          model: modelName,
+          input: m?.input_tokens ?? 0,
+          output: m?.output_tokens ?? 0,
+          thoughts: m?.thoughts_token_count ?? 0,  // not emitted by v0.37.1; forward-compat
+        }));
+        return;
+      }
+    }
+
+    // Fallback: flat stats fields (rare, older CLIs)
+    if (stats.input_tokens != null || stats.output_tokens != null) {
       this._usage = [{
         model: this._requestedModel ?? "unknown",
-        input: stats.input_token_count ?? 0,
-        output: stats.output_token_count ?? 0,
+        input: stats.input_tokens ?? 0,
+        output: stats.output_tokens ?? 0,
         thoughts: stats.thoughts_token_count ?? 0,
       }];
     }
