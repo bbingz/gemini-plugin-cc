@@ -2,12 +2,21 @@
 
 ## Unreleased
 
+### Aligned with codex-plugin-cc v1.0.4 (PR #234/#235)
+- `commands/rescue.md`: route through `Agent` tool explicitly instead of relying on subagent fork
+  - Drop `context: fork` — fork doesn't expose the `Agent` tool
+  - `allowed-tools` now includes `AskUserQuestion, Agent`
+  - Explicit warning against `Skill(gemini:rescue)` recursion (skill and command share the name)
+
 ### Engram Integration
 - Add Engram sidecar writer: `writeEngramSidecar()` writes `{sessionId}.engram.json` alongside Gemini session files
 - Sidecar links Gemini CLI sessions back to parent Claude Code session via `GEMINI_COMPANION_SESSION_ID`
 - Project directory resolved from `~/.gemini/projects.json` (longest prefix match)
 - Integrated into both `callGemini()` (sync) and `callGeminiStreaming()` (async)
 - Fail-open: sidecar write errors never affect main flow
+
+### Fixes
+- Prevent Gemini CLI `modelSteering` from silently swapping models: always pass `-m` explicitly, falling back to `~/.gemini/settings.json` default when caller omits it
 
 ## 0.5.1 (2026-04-18)
 

@@ -1,11 +1,11 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up work to the Gemini rescue subagent
 argument-hint: "[--background|--wait] [--resume-last|--fresh] [--write] [--model <model>] [--effort <low|medium|high>] [what Gemini should investigate, solve, or continue]"
-context: fork
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
-Route this request to the `gemini:gemini-agent` subagent.
+Invoke the `gemini:gemini-agent` subagent via the `Agent` tool (`subagent_type: "gemini:gemini-agent"`), forwarding the raw user request as the prompt.
+`gemini:gemini-agent` is a subagent, not a skill — do not call `Skill(gemini:gemini-agent)` (no such skill) or `Skill(gemini:rescue)` (that re-enters this command and hangs the session). The command runs inline so the `Agent` tool stays in scope; forked general-purpose subagents do not expose it.
 The final user-visible response must be Gemini's output verbatim.
 
 Raw user request:

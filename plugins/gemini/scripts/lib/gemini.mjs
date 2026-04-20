@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { binaryAvailable, runCommand } from "./process.mjs";
@@ -5,12 +8,92 @@ import { binaryAvailable, runCommand } from "./process.mjs";
 const DEFAULT_TIMEOUT_MS = 300_000;
 const AUTH_CHECK_TIMEOUT_MS = 30_000;
 
+// ── Engram sidecar ─────────────────────────────────────
+
+const PARENT_SESSION_ENV = "GEMINI_COMPANION_SESSION_ID";
+
+/**
+ * Resolve the Gemini CLI project name for a given cwd by reading
+ * ~/.gemini/projects.json and finding the longest matching prefix.
+ * Returns null if no match is found.
+ */
+function resolveGeminiProjectName(cwd) {
+  try {
+    const projectsPath = path.join(os.homedir(), ".gemini", "projects.json");
+    const { projects } = JSON.parse(fs.readFileSync(projectsPath, "utf8"));
+    if (!projects) return null;
+
+    let bestMatch = null;
+    let bestLen = 0;
+    const resolved = path.resolve(cwd || process.cwd());
+    for (const [dir, name] of Object.entries(projects)) {
+      const rdir = path.resolve(dir);
+      if ((resolved === rdir || resolved.startsWith(rdir + path.sep)) && rdir.length > bestLen) {
+        bestMatch = name;
+        bestLen = rdir.length;
+      }
+    }
+    return bestMatch;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write an Engram sidecar file next to the Gemini session file so that
+ * Engram can deterministically link this session back to its Claude Code parent.
+ *
+ * Fail-open: errors are silently ignored to never affect the main flow.
+ */
+function writeEngramSidecar(sessionId, cwd) {
+  try {
+    if (!sessionId) return;
+    const projectName = resolveGeminiProjectName(cwd);
+    if (!projectName) return;
+
+    const chatsDir = path.join(os.homedir(), ".gemini", "tmp", projectName, "chats");
+    // Ensure chats directory exists (Gemini CLI may not have created it yet for fast calls)
+    fs.mkdirSync(chatsDir, { recursive: true });
+
+    const sidecarPath = path.join(chatsDir, `${sessionId}.engram.json`);
+    fs.writeFileSync(sidecarPath, JSON.stringify({
+      originator: "claude-code",
+      parentSessionId: process.env[PARENT_SESSION_ENV] || null,
+      createdAt: new Date().toISOString(),
+    }));
+  } catch {
+    // Write failure must not affect main flow
+  }
+}
+
+// ── Gemini CLI settings ─────────────────────────────────
+
+let _cachedSettingsModel = undefined;
+
+/**
+ * Read the default model from ~/.gemini/settings.json.
+ * Cached after first read to avoid repeated disk I/O.
+ */
+function getSettingsModel() {
+  if (_cachedSettingsModel !== undefined) return _cachedSettingsModel;
+  try {
+    const settingsPath = path.join(os.homedir(), ".gemini", "settings.json");
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    _cachedSettingsModel = settings?.model?.name || null;
+  } catch {
+    _cachedSettingsModel = null;
+  }
+  return _cachedSettingsModel;
+}
+
 // ── Shared argument builder ─────────────────────────────
 
 function buildGeminiArgs({ prompt, model, approvalMode, outputFormat, resumeSessionId, extraArgs }) {
   const useStdin = prompt.length > 100_000;
   const args = ["-p", useStdin ? "" : prompt, "-o", outputFormat];
-  if (model) args.push("-m", model);
+  // Always pass -m to prevent modelSteering from overriding
+  const effectiveModel = model || getSettingsModel();
+  if (effectiveModel) args.push("-m", effectiveModel);
   args.push("--approval-mode", approvalMode);
   if (resumeSessionId) args.push("--resume", resumeSessionId);
   if (extraArgs?.length) args.push(...extraArgs);
@@ -68,12 +151,14 @@ export function callGemini({
         code: parsed.error.code,
       };
     }
-    return {
+    const syncResult = {
       ok: true,
       response: parsed.response,
       sessionId: parsed.session_id,
       stats: parsed.stats,
     };
+    writeEngramSidecar(syncResult.sessionId, cwd);
+    return syncResult;
   } catch (e) {
     return { ok: false, error: `JSON parse failed: ${e.message}` };
   }
@@ -233,6 +318,7 @@ export function callGeminiStreaming({
       // Build final response from accumulated assistant deltas
       const response = responseChunks.join("");
 
+      writeEngramSidecar(sessionId, cwd);
       resolve({
         ok: true,
         response,
