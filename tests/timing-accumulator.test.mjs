@@ -79,3 +79,55 @@ test("retry before first token is subtracted from ttftMs", () => {
   assert.equal(t.retryMs, 200);
   assert.equal(t.ttftMs, 200);    // 400 - 200
 });
+
+test("per_model_usage populates usage[] and drives tokensPerSec", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.setRequestedModel("gemini-3-pro-preview");
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(2200);          // streamMs = 2000 ms = 2s
+  acc.onResult({
+    stats: {
+      per_model_usage: [
+        { model: "gemini-3.1-pro-preview",   input_token_count: 100, output_token_count: 50,  thoughts_token_count: 20 },
+        { model: "gemini-3-flash-preview",   input_token_count: 200, output_token_count: 150, thoughts_token_count: 30 },
+      ],
+    },
+  });
+  acc.onClose(2210, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.equal(t.requestedModel, "gemini-3-pro-preview");
+  assert.equal(t.usage.length, 2);
+  assert.deepEqual(t.usage[0], { model: "gemini-3.1-pro-preview", input: 100, output: 50, thoughts: 20 });
+  // tokensPerSec = (50+150+20+30) / 2.0 = 125
+  assert.equal(t.tokensPerSec, 125);
+});
+
+test("flat stats fallback when no per_model_usage", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.setRequestedModel("gemini-3-flash-preview");
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(1200);          // 1s stream
+  acc.onResult({
+    stats: { input_token_count: 100, output_token_count: 200, thoughts_token_count: 50 },
+  });
+  acc.onClose(1210, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.equal(t.usage.length, 1);
+  assert.equal(t.usage[0].model, "gemini-3-flash-preview");
+  assert.equal(t.usage[0].output, 200);
+  assert.equal(t.tokensPerSec, 250);   // (200+50) / 1
+});
+
+test("missing token fields leave tokensPerSec null", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(1200);
+  acc.onResult({ stats: {} });
+  acc.onClose(1210, { exitCode: 0 });
+  assert.equal(acc.build().tokensPerSec, null);
+});

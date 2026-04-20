@@ -49,6 +49,33 @@ export class TimingAccumulator {
     }
   }
 
+  setRequestedModel(m) {
+    this._requestedModel = m || null;
+  }
+
+  onResult(resultEvent) {
+    const stats = resultEvent?.stats || {};
+    if (Array.isArray(stats.per_model_usage) && stats.per_model_usage.length > 0) {
+      this._usage = stats.per_model_usage.map((u) => ({
+        model: u.model ?? "unknown",
+        input: u.input_token_count ?? 0,
+        output: u.output_token_count ?? 0,
+        thoughts: u.thoughts_token_count ?? 0,
+      }));
+    } else if (
+      stats.input_token_count != null ||
+      stats.output_token_count != null ||
+      stats.thoughts_token_count != null
+    ) {
+      this._usage = [{
+        model: this._requestedModel ?? "unknown",
+        input: stats.input_token_count ?? 0,
+        output: stats.output_token_count ?? 0,
+        thoughts: stats.thoughts_token_count ?? 0,
+      }];
+    }
+  }
+
   onRetryStart(t = Date.now()) {
     this._retryStart = t;
   }
@@ -87,6 +114,12 @@ export class TimingAccumulator {
     const tailMs = lastToken != null ? Math.max(0, close - lastToken) : null;
     const totalMs = close - spawned;
 
+    const usage = this._usage || [];
+    const totalOutputAndThoughts = usage.reduce((s, u) => s + (u.output || 0) + (u.thoughts || 0), 0);
+    const tokensPerSec = usage.length > 0 && streamMs > 0
+      ? Math.round((totalOutputAndThoughts / (streamMs / 1000)) * 10) / 10
+      : null;
+
     return {
       spawnedAt: new Date(spawned).toISOString(),
       firstEventMs,
@@ -102,10 +135,9 @@ export class TimingAccumulator {
       terminationReason: this._termination.reason,
       timedOut: this._termination.timedOut,
       signal: this._termination.signal,
-      // Filled by later tasks:
-      requestedModel: null,
-      usage: [],
-      tokensPerSec: null,
+      requestedModel: this._requestedModel || null,
+      usage,
+      tokensPerSec,
       coldStartPhases: null,
     };
   }
