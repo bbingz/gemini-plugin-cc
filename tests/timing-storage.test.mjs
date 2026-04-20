@@ -75,3 +75,28 @@ test("file exceeding 10MB is trimmed to newest 50%", () => {
   const rows = readTimingHistory();
   assert.ok(rows.some((r) => r.jobId === "gt-trigger-trim"), "new record survives trim");
 });
+
+test("two concurrent appendTimingHistory calls both land", async () => {
+  // Reset file
+  try { fs.unlinkSync(resolveTimingHistoryFile()); } catch { /* gone */ }
+
+  const child = await import("node:child_process");
+  const script = `
+    import { appendTimingHistory } from "${path.resolve("plugins/gemini/scripts/lib/state.mjs")}";
+    process.env.CLAUDE_PLUGIN_DATA = "${tmpRoot}";
+    for (let i = 0; i < 20; i++) appendTimingHistory({ jobId: "gt-p" + process.pid + "-" + i });
+  `;
+  await Promise.all([
+    new Promise((r) => {
+      const p = child.spawn(process.execPath, ["--input-type=module", "-e", script], { env: process.env });
+      p.on("close", r);
+    }),
+    new Promise((r) => {
+      const p = child.spawn(process.execPath, ["--input-type=module", "-e", script], { env: process.env });
+      p.on("close", r);
+    }),
+  ]);
+
+  const rows = readTimingHistory();
+  assert.equal(rows.length, 40, `expected 40 rows, got ${rows.length}`);
+});
