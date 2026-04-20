@@ -38,6 +38,17 @@ export class TimingAccumulator {
     };
   }
 
+  onToolUseStart(t = Date.now()) {
+    this._toolStart = t;
+  }
+
+  onToolResult(t = Date.now()) {
+    if (this._toolStart != null) {
+      this._toolMs += t - this._toolStart;
+      this._toolStart = null;
+    }
+  }
+
   recordResponseBytes(n) {
     this._responseBytes += n;
   }

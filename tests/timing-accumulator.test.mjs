@@ -28,3 +28,24 @@ test("happy path — 5 boundaries produce correct segments", () => {
     t.totalMs
   );
 });
+
+test("tool cycles accumulate into toolMs and subtract from streamMs", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onToolUseStart(300);
+  acc.onToolResult(500);          // one tool cycle: 200ms
+  acc.onToolUseStart(700);
+  acc.onToolResult(800);          // another: 100ms
+  acc.onLastToken(1200);          // (1200 - 200) = 1000 raw; minus 300 tool = 700 stream
+  acc.onClose(1210, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.equal(t.toolMs, 300);
+  assert.equal(t.streamMs, 700);
+  // Invariant
+  assert.equal(
+    t.firstEventMs + t.ttftMs + t.streamMs + t.toolMs + t.retryMs + t.tailMs,
+    t.totalMs
+  );
+});
