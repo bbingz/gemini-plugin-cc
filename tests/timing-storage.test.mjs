@@ -34,3 +34,14 @@ test("two appends produce two lines", () => {
   // previous test already wrote 1 record; expect >=3
   assert.ok(rows.length >= 3);
 });
+
+test("append after a partial-line file prepends newline to recover", () => {
+  const file = resolveTimingHistoryFile();
+  // Force-write a partial line (no trailing \n)
+  fs.writeFileSync(file, '{"jobId":"gt-part');
+  appendTimingHistory({ jobId: "gt-after" });
+
+  const rows = readTimingHistory();
+  // The partial line is corrupt and skipped; new line is recoverable
+  assert.ok(rows.some((r) => r.jobId === "gt-after"));
+});

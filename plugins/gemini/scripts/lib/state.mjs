@@ -275,7 +275,24 @@ export function appendTimingHistory(record) {
   }
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const line = JSON.stringify(record) + "\n";
+
+    // Repair: if file ends without \n (prior crash), prepend one
+    let needsLeadingNewline = false;
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 0) {
+        const buf = Buffer.alloc(1);
+        const fd = fs.openSync(file, "r");
+        try {
+          fs.readSync(fd, buf, 0, 1, st.size - 1);
+        } finally {
+          fs.closeSync(fd);
+        }
+        if (buf[0] !== 0x0A /* \n */) needsLeadingNewline = true;
+      }
+    } catch { /* new file */ }
+
+    const line = (needsLeadingNewline ? "\n" : "") + JSON.stringify(record) + "\n";
     fs.appendFileSync(file, line);
     return true;
   } catch (e) {
