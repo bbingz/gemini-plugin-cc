@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 — 2026-04-20
+
+### Added
+- **Timing telemetry**: `callGeminiStreaming` now emits a `timing` object per job with 6 segments (cold / ttft / gen / tool / retry / tail), authoritative per-model usage from `per_model_usage` (catches silent Pro→Flash fallbacks), and optional `coldStartPhases` breakdown from `GEMINI_TELEMETRY_ENABLED=1`.
+- **`/gemini:timing` command**: single-job detail view with ASCII bars, `--history` table (newest-first), `--stats` aggregate with p50/p95/p99 (suppressed at n<20 / n<100 respectively), and `--json` on all modes.
+- **Global history**: all streaming jobs (background workers AND foreground `ask`/`task`) appended to `~/.claude/plugins/gemini/timings.ndjson` under a dedicated lock; partial-line repair on crash recovery; trimmed to newest 50% at 10 MB.
+- **Status view**: finished jobs in `/gemini:status` now show a one-line timing summary (`cold X · ttft Y · gen Z · ...`).
+- **Silent-fallback detection**: when `per_model_usage` shows more than one model entry, the single-job view flags `⚠ silent fallback detected`.
+- **`terminationReason` discriminator** (`exit` / `timeout` / `signal` / `error`) with signal name captured for SIGINT/SIGTERM cancels.
+
+### Notes
+- Synchronous `callGemini` (review / adversarial-review) is NOT yet instrumented — deferred to 0.6.1.
+- Cross-plugin comparison against Codex (`--compare codex`) deferred to 0.6.1 — Codex lacks segment timing, totals-only comparison was low-signal.
+- Jobs completed before 0.6.0 render their timing row as omitted (not `—`).
+- `invariantOk` is reported only on clean-exit jobs; `null` on timeout/signal/error paths (the model has inherent null segments that can't sum to total).
+
 ## 0.5.2 (2026-04-20)
 
 ### Aligned with codex-plugin-cc v1.0.4 (PR #234/#235)
