@@ -191,3 +191,28 @@ test("non-zero exit → terminationReason=error", () => {
   assert.equal(t.terminationReason, "error");
   assert.equal(t.exitCode, 1);
 });
+
+test("build() result satisfies segment-sum invariant on happy path", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onToolUseStart(300);
+  acc.onToolResult(450);
+  acc.onRetryStart(500);
+  acc.onRetryEnd(550);
+  acc.onLastToken(900);
+  acc.onClose(910, { exitCode: 0 });
+
+  const t = acc.build();
+  const sum = t.firstEventMs + t.ttftMs + t.streamMs + t.toolMs + t.retryMs + t.tailMs;
+  assert.equal(sum, t.totalMs, `invariant broken: ${sum} !== ${t.totalMs}`);
+});
+
+test("build() exposes invariant via explicit property for runtime assertions", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(300);
+  acc.onClose(310, { exitCode: 0 });
+  assert.equal(acc.build().invariantOk, true);
+});

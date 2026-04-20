@@ -129,6 +129,9 @@ export class TimingAccumulator {
       ? Math.round((totalOutputAndThoughts / (streamMs / 1000)) * 10) / 10
       : null;
 
+    const sum = (firstEventMs || 0) + (ttftMs || 0) + streamMs + this._toolMs + this._retryMs + (tailMs || 0);
+    const invariantOk = sum === totalMs;
+
     return {
       spawnedAt: new Date(spawned).toISOString(),
       firstEventMs,
@@ -148,6 +151,7 @@ export class TimingAccumulator {
       usage,
       tokensPerSec,
       coldStartPhases: this._coldStartPhases || null,
+      invariantOk,
     };
   }
 }
