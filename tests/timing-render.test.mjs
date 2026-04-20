@@ -54,6 +54,45 @@ test("renderStatusSummaryLine omits zero segments", async () => {
   assert.ok(!line.includes("retry"));
 });
 
+test("renderTimingBreakdown: empty array returns null (caller skips block)", async () => {
+  const { renderTimingBreakdown } = await import("../plugins/gemini/scripts/lib/render.mjs");
+  assert.equal(renderTimingBreakdown([]), null);
+  assert.equal(renderTimingBreakdown(null), null);
+  assert.equal(renderTimingBreakdown(undefined), null);
+});
+
+test("renderTimingBreakdown: one entry produces a bullet block", async () => {
+  const { renderTimingBreakdown } = await import("../plugins/gemini/scripts/lib/render.mjs");
+  const out = renderTimingBreakdown([
+    { id: "gt-abc123", summary: "cold 1.8s · ttft 18.4s · gen 2m 10s" },
+  ]);
+  assert.ok(out.includes("**Timing breakdown:**"));
+  assert.ok(out.includes("- `gt-abc123` — cold 1.8s"));
+});
+
+test("renderTimingBreakdown: multiple entries all render", async () => {
+  const { renderTimingBreakdown } = await import("../plugins/gemini/scripts/lib/render.mjs");
+  const out = renderTimingBreakdown([
+    { id: "gt-a", summary: "cold 1s · ttft 2s" },
+    { id: "gt-b", summary: "cold 3s · ttft 4s" },
+    { id: "gt-c", summary: "cold 5s · ttft 6s" },
+  ]);
+  assert.ok(out.includes("gt-a"));
+  assert.ok(out.includes("gt-b"));
+  assert.ok(out.includes("gt-c"));
+  // Count bullets
+  const bullets = (out.match(/^- /gm) || []).length;
+  assert.equal(bullets, 3);
+});
+
+test("renderTimingBreakdown: block does NOT start with a pipe (markdown-table-safe)", async () => {
+  const { renderTimingBreakdown } = await import("../plugins/gemini/scripts/lib/render.mjs");
+  const out = renderTimingBreakdown([{ id: "gt-x", summary: "cold 1s" }]);
+  // The block starts with a blank line then the heading, not a table-row pipe
+  const firstNonEmptyLine = out.split("\n").find(l => l.trim().length > 0);
+  assert.ok(!firstNonEmptyLine.startsWith("|"), "breakdown block must not start with pipe");
+});
+
 test("renderSingleJobDetail shows bars, segments, and fallback warning", async () => {
   const { renderSingleJobDetail } = await import("../plugins/gemini/scripts/lib/timing.mjs");
   const output = renderSingleJobDetail({

@@ -76,6 +76,26 @@ test("file exceeding 10MB is trimmed to newest 50%", () => {
   assert.ok(rows.some((r) => r.jobId === "gt-trigger-trim"), "new record survives trim");
 });
 
+test("resolveTimingHistoryFile falls back under tmpdir/gemini-companion when CLAUDE_PLUGIN_DATA absent", async () => {
+  // Capture current env, temporarily unset
+  const saved = process.env.CLAUDE_PLUGIN_DATA;
+  delete process.env.CLAUDE_PLUGIN_DATA;
+  try {
+    // Re-import to pick up fresh env — note: ESM caches, so we can't truly re-evaluate,
+    // but the resolve* functions read env at call time, not module load time.
+    const mod = await import("../plugins/gemini/scripts/lib/state.mjs");
+    const p = mod.resolveTimingHistoryFile();
+    const os = await import("node:os");
+    const path = await import("node:path");
+    assert.ok(
+      p.startsWith(path.join(os.tmpdir(), "gemini-companion")),
+      `fallback path ${p} should be under ${os.tmpdir()}/gemini-companion`
+    );
+  } finally {
+    if (saved !== undefined) process.env.CLAUDE_PLUGIN_DATA = saved;
+  }
+});
+
 test("two concurrent appendTimingHistory calls both land", async () => {
   // Reset file
   try { fs.unlinkSync(resolveTimingHistoryFile()); } catch { /* gone */ }
