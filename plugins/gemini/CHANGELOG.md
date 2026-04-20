@@ -3,18 +3,26 @@
 ## 0.6.0 — 2026-04-20
 
 ### Added
-- **Timing telemetry**: `callGeminiStreaming` now emits a `timing` object per job with 6 segments (cold / ttft / gen / tool / retry / tail), authoritative per-model usage from `per_model_usage` (catches silent Pro→Flash fallbacks), and optional `coldStartPhases` breakdown from `GEMINI_TELEMETRY_ENABLED=1`.
+- **Timing telemetry**: `callGeminiStreaming` now emits a `timing` object per job with 6 segments (cold / ttft / gen / tool / retry / tail), authoritative per-model usage from `stats.models` (catches silent Pro→Flash fallbacks), and optional `coldStartPhases` breakdown when the CLI emits `startup_stats`.
 - **`/gemini:timing` command**: single-job detail view with ASCII bars, `--history` table (newest-first), `--stats` aggregate with p50/p95/p99 (suppressed at n<20 / n<100 respectively), and `--json` on all modes.
-- **Global history**: all streaming jobs (background workers AND foreground `ask`/`task`) appended to `~/.claude/plugins/gemini/timings.ndjson` under a dedicated lock; partial-line repair on crash recovery; trimmed to newest 50% at 10 MB.
-- **Status view**: finished jobs in `/gemini:status` now show a one-line timing summary (`cold X · ttft Y · gen Z · ...`).
-- **Silent-fallback detection**: when `per_model_usage` shows more than one model entry, the single-job view flags `⚠ silent fallback detected`.
+- **Global history**: all streaming jobs (background workers AND foreground `ask`/`task`) appended to `<plugin-data>/timings.ndjson` under a dedicated lock; partial-line repair on crash recovery; trimmed to newest 50% at 10 MB.
+- **Status view**: finished jobs in `/gemini:status` show timing breakdown as a separate list below the Recent Jobs table (markdown-table-safe).
+- **Silent-fallback detection**: when more than one model appears in `stats.models`, the single-job view flags `⚠ silent fallback detected`.
 - **`terminationReason` discriminator** (`exit` / `timeout` / `signal` / `error`) with signal name captured for SIGINT/SIGTERM cancels.
+- **Defensive event routing**: tool events accepted as either `tool_use`/`tool_result` or `tool_call`/`tool_response`; startup telemetry accepts both `gemini_cli.startup_stats` and `startup_stats`; both `GEMINI_TELEMETRY_ENABLED` and `GEMINI_CLI_TELEMETRY` env vars set.
+
+### Fixed
+- `renderGeminiResult` model/token line was reading non-existent `models[name].tokens.*` fields — corrected to real CLI schema (`total_tokens`, `input_tokens`, `cached`).
+- Open retry window at process close is now flushed into `retryMs` instead of being lost to `tailMs`.
+- `setRequestedModel` is first-wins — protects caller-seeded model from being overwritten by CLI's `init.model` (which may show the resolved post-fallback model).
+- `event.fatal === false` explicit check — missing `fatal` field no longer opens an infinite retry window.
 
 ### Notes
 - Synchronous `callGemini` (review / adversarial-review) is NOT yet instrumented — deferred to 0.6.1.
 - Cross-plugin comparison against Codex (`--compare codex`) deferred to 0.6.1 — Codex lacks segment timing, totals-only comparison was low-signal.
 - Jobs completed before 0.6.0 render their timing row as omitted (not `—`).
 - `invariantOk` is reported only on clean-exit jobs; `null` on timeout/signal/error paths (the model has inherent null segments that can't sum to total).
+- `thoughts_token_count` (reasoning tokens) is not emitted by gemini-cli v0.37.1 — forward-compat field in schema but currently always `0`.
 
 ## 0.5.2 (2026-04-20)
 
