@@ -247,3 +247,14 @@ export function renderSingleJobDetail({ job, timing }) {
   }
   return lines.join("\n");
 }
+
+// ─── Aggregate helpers ────────────────────────────────────────────────────────
+
+export function percentile(values, p) {
+  const filtered = values.filter((v) => v != null && typeof v === "number");
+  if (filtered.length === 0) return null;
+  const sorted = filtered.slice().sort((a, b) => a - b);
+  const rank = Math.ceil(p * sorted.length);
+  const idx = Math.max(0, Math.min(sorted.length - 1, rank - 1));
+  return sorted[idx];
+}
