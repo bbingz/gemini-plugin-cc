@@ -101,6 +101,19 @@ export function renderJobSubmitted(job) {
 }
 
 /**
+ * Render the post-table timing breakdown block. Returns null if empty
+ * (so caller can skip pushing anything).
+ */
+export function renderTimingBreakdown(finishedTimings) {
+  if (!finishedTimings || finishedTimings.length === 0) return null;
+  const lines = ["", "**Timing breakdown:**", ""];
+  for (const t of finishedTimings) {
+    lines.push(`- \`${t.id}\` — ${t.summary}`);
+  }
+  return lines.join("\n");
+}
+
+/**
  * Render status report as human-readable markdown.
  */
 export function renderStatusReport(snapshot, workspaceRoot = null) {
@@ -146,12 +159,8 @@ export function renderStatusReport(snapshot, workspaceRoot = null) {
       }
     }
     // After the table: collected timing breakdown as a list (safe for markdown)
-    if (finishedTimings.length > 0) {
-      lines.push("\n**Timing breakdown:**\n");
-      for (const t of finishedTimings) {
-        lines.push(`- \`${t.id}\` — ${t.summary}`);
-      }
-    }
+    const breakdown = renderTimingBreakdown(finishedTimings);
+    if (breakdown) lines.push(breakdown);
 
     // Latest finished hint
     const latestFinished = snapshot.recent.find((j) => j.status === "completed" || j.status === "failed");

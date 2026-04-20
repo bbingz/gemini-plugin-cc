@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { binaryAvailable, runCommand } from "./process.mjs";
-import { TimingAccumulator } from "./timing.mjs";
+import { TimingAccumulator, dispatchTimingEvent } from "./timing.mjs";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const AUTH_CHECK_TIMEOUT_MS = 30_000;
@@ -283,41 +283,17 @@ export function callGeminiStreaming({
         return; // Not valid JSON — skip
       }
 
-      timing.onFirstEvent();
-
-      // Close any open retry window: retries are marked by non-fatal `error` events
-      // and terminate on the next non-error event.
-      if (event.type !== "error" && timing._retryStart != null) {
-        timing.onRetryEnd();
-      }
+      dispatchTimingEvent(event, timing);
 
       try { onEvent(event); } catch { /* callback errors don't break us */ }
 
+      // Closure-state side effects (NOT timing-related)
       if (event.type === "init") {
         sessionId = event.session_id || null;
-        // setRequestedModel is first-wins; callers already seeded from settings.json.
-        // init.model here is a best-effort override only if we had nothing.
-        if (event.model) timing.setRequestedModel(event.model);
-      } else if (event.type === "message" && event.role === "assistant") {
-        if (event.content != null && event.content.length > 0) {
-          timing.onFirstToken();
-          timing.onLastToken();
-          timing.recordResponseBytes(Buffer.byteLength(event.content, "utf8"));
-        }
-        if (event.content != null) {
-          responseChunks.push(event.content);
-        }
+      } else if (event.type === "message" && event.role === "assistant" && event.content != null) {
+        responseChunks.push(event.content);
       } else if (event.type === "result") {
         stats = event.stats || null;
-        timing.onResult(event);
-      } else if (event.type === "tool_use" || event.type === "tool_call") {
-        timing.onToolUseStart();
-      } else if (event.type === "tool_result" || event.type === "tool_response") {
-        timing.onToolResult();
-      } else if (event.type === "error" && event.fatal === false) {
-        timing.onRetryStart();
-      } else if (event.type === "gemini_cli.startup_stats" || event.type === "startup_stats") {
-        timing.onStartupStats(event);
       }
     }
 

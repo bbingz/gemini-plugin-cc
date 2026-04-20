@@ -340,6 +340,40 @@ export function renderAggregateTable(stats, { kind = "all" } = {}) {
   return lines.join("\n");
 }
 
+/**
+ * Pure dispatcher: route a parsed NDJSON event to the right TimingAccumulator method.
+ * Accepts both legacy and alternate event-type names for forward compatibility.
+ * Side effects: ONLY calls TimingAccumulator methods — no closure state mutation.
+ */
+export function dispatchTimingEvent(event, timing) {
+  timing.onFirstEvent();
+
+  // Close any open retry window on the next non-error event
+  if (event.type !== "error" && timing._retryStart != null) {
+    timing.onRetryEnd();
+  }
+
+  if (event.type === "init") {
+    if (event.model) timing.setRequestedModel(event.model);
+  } else if (event.type === "message" && event.role === "assistant") {
+    if (event.content != null && event.content.length > 0) {
+      timing.onFirstToken();
+      timing.onLastToken();
+      timing.recordResponseBytes(Buffer.byteLength(event.content, "utf8"));
+    }
+  } else if (event.type === "tool_use" || event.type === "tool_call") {
+    timing.onToolUseStart();
+  } else if (event.type === "tool_result" || event.type === "tool_response") {
+    timing.onToolResult();
+  } else if (event.type === "error" && event.fatal === false) {
+    timing.onRetryStart();
+  } else if (event.type === "gemini_cli.startup_stats" || event.type === "startup_stats") {
+    timing.onStartupStats(event);
+  } else if (event.type === "result") {
+    timing.onResult(event);
+  }
+}
+
 export function filterHistory(records, { kind, last, since } = {}) {
   let out = records.slice();
   if (kind) out = out.filter((r) => r.kind === kind);
