@@ -608,7 +608,7 @@ function handleStatus(argv) {
         running: result.status === "running" ? [result] : [],
         recent: result.status !== "running" ? [result] : [],
         waitTimedOut: result.waitTimedOut,
-      }),
+      }, workspaceRoot),
       options.json
     );
     return;
@@ -625,7 +625,7 @@ function handleStatus(argv) {
       return;
     }
     outputResult(
-      options.json ? snapshot : renderStatusReport({ totalJobs: 1, running: snapshot.status === "running" ? [snapshot] : [], recent: snapshot.status !== "running" ? [snapshot] : [] }),
+      options.json ? snapshot : renderStatusReport({ totalJobs: 1, running: snapshot.status === "running" ? [snapshot] : [], recent: snapshot.status !== "running" ? [snapshot] : [] }, workspaceRoot),
       options.json
     );
     return;
@@ -633,7 +633,7 @@ function handleStatus(argv) {
 
   const snapshot = buildStatusSnapshot(workspaceRoot, { showAll: options.all });
   outputResult(
-    options.json ? snapshot : renderStatusReport(snapshot),
+    options.json ? snapshot : renderStatusReport(snapshot, workspaceRoot),
     options.json
   );
 }

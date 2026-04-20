@@ -1,3 +1,6 @@
+import { renderStatusSummaryLine } from "./timing.mjs";
+import { readJobFile, resolveJobFile } from "./state.mjs";
+
 /**
  * Render setup report as human-readable markdown.
  */
@@ -100,7 +103,7 @@ export function renderJobSubmitted(job) {
 /**
  * Render status report as human-readable markdown.
  */
-export function renderStatusReport(snapshot) {
+export function renderStatusReport(snapshot, workspaceRoot = null) {
   const lines = [];
 
   if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
@@ -129,6 +132,17 @@ export function renderStatusReport(snapshot) {
       lines.push(
         `| \`${job.id}\` | ${job.kindLabel} | ${job.status} | ${job.phase || "-"} | ${job.elapsed || "?"} |`
       );
+      if (workspaceRoot && (job.status === "completed" || job.status === "failed")) {
+        try {
+          const envelope = readJobFile(resolveJobFile(workspaceRoot, job.id));
+          const timing = envelope?.timing ?? null;
+          if (timing) {
+            lines.push("  " + renderStatusSummaryLine(timing));
+          }
+        } catch {
+          // ignore — legacy jobs or missing files render without timing
+        }
+      }
     }
 
     // Latest finished hint
