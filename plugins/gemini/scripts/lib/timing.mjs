@@ -49,6 +49,22 @@ export class TimingAccumulator {
     }
   }
 
+  onRetryStart(t = Date.now()) {
+    this._retryStart = t;
+  }
+
+  onRetryEnd(t = Date.now()) {
+    if (this._retryStart != null) {
+      const delta = t - this._retryStart;
+      this._retryMs += delta;
+      // Split bookkeeping: track retry time that occurred before firstToken
+      if (this._t.firstToken == null) {
+        this._retryMsBeforeFirstToken = (this._retryMsBeforeFirstToken || 0) + delta;
+      }
+      this._retryStart = null;
+    }
+  }
+
   recordResponseBytes(n) {
     this._responseBytes += n;
   }
@@ -61,9 +77,13 @@ export class TimingAccumulator {
     const lastToken = this._t.lastToken;
 
     const firstEventMs = firstEvent != null ? firstEvent - spawned : null;
-    const ttftMs = firstToken != null && firstEvent != null ? firstToken - firstEvent : null;
+    const rawTtft = firstToken != null && firstEvent != null ? firstToken - firstEvent : null;
+    const ttftMs = rawTtft != null
+      ? Math.max(0, rawTtft - (this._retryMsBeforeFirstToken || 0))
+      : null;
     const rawStream = lastToken != null && firstToken != null ? lastToken - firstToken : 0;
-    const streamMs = Math.max(0, rawStream - this._toolMs - this._retryMs);
+    const retryMsAfterFirstToken = this._retryMs - (this._retryMsBeforeFirstToken || 0);
+    const streamMs = Math.max(0, rawStream - this._toolMs - retryMsAfterFirstToken);
     const tailMs = lastToken != null ? Math.max(0, close - lastToken) : null;
     const totalMs = close - spawned;
 

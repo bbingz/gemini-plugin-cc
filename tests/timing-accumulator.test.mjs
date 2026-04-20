@@ -49,3 +49,33 @@ test("tool cycles accumulate into toolMs and subtract from streamMs", () => {
     t.totalMs
   );
 });
+
+test("retry windows accumulate into retryMs and subtract from streamMs", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onRetryStart(400);
+  acc.onRetryEnd(600);            // 200ms retry
+  acc.onRetryStart(900);
+  acc.onRetryEnd(950);            // 50ms retry
+  acc.onLastToken(1200);          // 1000 raw; minus 250 retry = 750 stream
+  acc.onClose(1210, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.equal(t.retryMs, 250);
+  assert.equal(t.streamMs, 750);
+});
+
+test("retry before first token is subtracted from ttftMs", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onRetryStart(150);
+  acc.onRetryEnd(350);            // 200ms retry during ttft
+  acc.onFirstToken(500);          // raw ttft = 400; net = 200
+  acc.onLastToken(600);
+  acc.onClose(610, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.equal(t.retryMs, 200);
+  assert.equal(t.ttftMs, 200);    // 400 - 200
+});
