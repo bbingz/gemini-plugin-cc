@@ -4,10 +4,11 @@ Claude Code 插件，将 Google Gemini CLI 集成为按需调用的子代理。~
 
 ## 项目状态
 
-- **版本**: 0.5.2 (engram sidecar + modelSteering guard + rescue Agent routing)
+- **版本**: 0.6.0 (timing telemetry — 6-segment breakdown + `/gemini:timing` + global history)
 - **GitHub**: https://github.com/bbingz/gemini-plugin-cc
 - **安装**: `claude plugin marketplace add bbingz/gemini-plugin-cc && claude plugin install gemini`
-- **Codex 对齐**: ~95% (剩余 ~5% 是 CLI 冷启动开销，等 Google daemon mode PR)
+- **Codex 对齐**: ~95% (实测 CLI 冷启动 p50 ≈ 8.7s，占总时长 41%，等 Google daemon mode PR)
+- **可观测性**: 每次 streaming 调用 6 段耗时自动入 `timings.ndjson` 全局历史
 
 ## 目录结构
 
@@ -15,15 +16,16 @@ Claude Code 插件，将 Google Gemini CLI 集成为按需调用的子代理。~
 plugins/gemini/                    # 插件主体
   .claude-plugin/plugin.json       # 插件身份 + 版本
   agents/gemini-agent.md           # 子代理 (使用 task 命令)
-  commands/                        # 10 个用户命令
+  commands/                        # 用户命令
     setup.md                       # /gemini:setup — 安装检查 + review gate
     ask.md                         # /gemini:ask — 向 Gemini 提问 (streaming)
     review.md                      # /gemini:review — 代码审查 (sync, schema 强制)
     adversarial-review.md          # /gemini:adversarial-review — 对抗性审查
     rescue.md                      # /gemini:rescue — 任务委派 (支持 --resume-last)
-    status.md                      # /gemini:status — 后台任务状态 (支持 --wait)
-    result.md                      # /gemini:result — 获取完成输出
+    status.md                      # /gemini:status — 后台任务状态 (支持 --wait, 自带 timing summary)
+    result.md                      # /gemini:result — 获取完成输出 (带 timing 字段)
     cancel.md                      # /gemini:cancel — 取消后台任务 (SIGINT)
+    timing.md                      # /gemini:timing — 耗时细分 (single / --history / --stats)
   hooks/hooks.json                 # SessionStart / SessionEnd / Stop
   prompts/                         # Prompt 模板
   schemas/review-output.schema.json # Review 输出 JSON schema
@@ -33,19 +35,28 @@ plugins/gemini/                    # 插件主体
     stop-review-gate-hook.mjs      # Stop 审查门控
     lib/
       args.mjs                     # 参数解析
-      gemini.mjs                   # callGemini (sync) + callGeminiStreaming (async)
+      gemini.mjs                   # callGemini (sync) + callGeminiStreaming (async, w/ TimingAccumulator 埋点)
       git.mjs                      # 结构化 review context + getDiff + scope
-      job-control.mjs              # streaming worker + phases + wait + cancel
+      job-control.mjs              # streaming worker + phases + wait + cancel + timing 持久化
       process.mjs                  # 子进程管理
       prompts.mjs                  # 模板加载
-      render.mjs                   # 输出格式化 + follow-up hints
-      state.mjs                    # 配置/状态持久化 (workspace-keyed + file locking)
+      render.mjs                   # 输出格式化 + follow-up hints + markdown-safe timing block
+      state.mjs                    # 配置/状态持久化 (workspace-keyed + file locking + timings.ndjson)
+      timing.mjs                   # TimingAccumulator 纯类 + dispatchTimingEvent + bar/percentile/aggregate render
   skills/
     gemini-cli-runtime/SKILL.md    # 运行时契约 (task 命令)
     gemini-result-handling/SKILL.md # 输出呈现规则
     gemini-prompting/              # Prompt 优化 + references
   CHANGELOG.md
   LICENSE
+
+tests/                             # node:test, zero deps (since v0.6.0)
+  smoke.test.mjs                   # 测试框架验证
+  timing-accumulator.test.mjs      # TimingAccumulator 单测 (20)
+  timing-dispatch.test.mjs         # 事件路由单测 (14)
+  timing-render.test.mjs           # Bar/summary/single-job detail 单测 (9)
+  timing-aggregate.test.mjs        # percentile/stats/history 单测 (11)
+  timing-storage.test.mjs          # ndjson lock/trim/concurrent 单测 (5)
 ```
 
 ## 开发约定
@@ -93,10 +104,18 @@ node plugins/gemini/scripts/gemini-companion.mjs review --json
 node plugins/gemini/scripts/gemini-companion.mjs adversarial-review --json
 
 # 后台任务测试
-node plugins/gemini/scripts/gemini-companion.mjs ask --background "test" --json
+node plugins/gemini/scripts/gemini-companion.mjs task --background "test" --json
 node plugins/gemini/scripts/gemini-companion.mjs status --json
 node plugins/gemini/scripts/gemini-companion.mjs status <job-id> --wait --json
 node plugins/gemini/scripts/gemini-companion.mjs result --json
+
+# Timing 观测 (v0.6.0)
+node plugins/gemini/scripts/gemini-companion.mjs timing <job-id>          # 单任务 ASCII 细分
+node plugins/gemini/scripts/gemini-companion.mjs timing --history --json  # 历史表
+node plugins/gemini/scripts/gemini-companion.mjs timing --stats --json    # p50/p95/p99 聚合
+
+# 单元测试
+node --test 'tests/*.test.mjs'
 
 # 更新已安装的插件
 claude plugin marketplace update gemini-plugin
@@ -107,7 +126,8 @@ claude plugin update gemini@gemini-plugin
 
 ### 当前 (~95% Codex 对齐)
 - CLI stream-json 提供实时流式输出
-- 每次操作仍有 CLI 启动开销 (~2-3s)
+- **实测冷启动 p50 = 8.7s**（非早期估计的 2-3s；n=10 baseline 见 `memory/data_timing_baseline.md`）
+- 完整 6 段 timing 观测：cold / ttft / gen / tool / retry / tail
 
 ### 不可行 (需要 Google 支持)
 - 零冷启动 — 等 Google daemon mode PR (#15338)
