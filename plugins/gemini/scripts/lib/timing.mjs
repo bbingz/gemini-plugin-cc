@@ -157,3 +157,17 @@ export class TimingAccumulator {
     };
   }
 }
+
+// ─── Render helpers ───────────────────────────────────────────────────────────
+
+const BAR_FRAC = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+export function renderBar(value, max, width) {
+  if (!max || max <= 0 || value <= 0) return " ".repeat(width);
+  const filled = Math.max(0, Math.min(width, (value / max) * width));
+  const whole = Math.floor(filled);
+  const frac = filled - whole;
+  const fracChar = BAR_FRAC[Math.round(frac * 8)] || "";
+  const usedWidth = whole + (fracChar ? 1 : 0);
+  return "█".repeat(whole) + fracChar + " ".repeat(Math.max(0, width - usedWidth));
+}
