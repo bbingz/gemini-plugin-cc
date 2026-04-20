@@ -34,7 +34,7 @@ import {
   renderStoredJobResult,
   renderCancelReport,
 } from "./lib/render.mjs";
-import { getConfig, setConfig, upsertJob } from "./lib/state.mjs";
+import { getConfig, readJobFile, resolveJobFile, setConfig, upsertJob } from "./lib/state.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SELF = fileURLToPath(import.meta.url);
@@ -656,10 +656,12 @@ function handleResult(argv) {
 
   const result = readStoredJobResult(workspaceRoot, job.id);
   const enriched = buildSingleJobSnapshot(workspaceRoot, job.id) || job;
+  const envelope = readJobFile(resolveJobFile(workspaceRoot, job.id));
+  const timing = envelope?.timing ?? null;
 
   outputResult(
     options.json
-      ? { job: enriched, result }
+      ? { job: enriched, result, timing }
       : renderStoredJobResult(enriched, result),
     options.json
   );
