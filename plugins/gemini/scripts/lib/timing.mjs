@@ -171,3 +171,24 @@ export function renderBar(value, max, width) {
   const usedWidth = whole + (fracChar ? 1 : 0);
   return "█".repeat(whole) + fracChar + " ".repeat(Math.max(0, width - usedWidth));
 }
+
+export function formatMs(ms) {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const min = Math.floor(ms / 60_000);
+  const sec = Math.floor((ms % 60_000) / 1000);
+  return `${min}m ${sec}s`;
+}
+
+export function renderStatusSummaryLine(timing) {
+  if (!timing) return "—";
+  const parts = [];
+  if (timing.firstEventMs != null) parts.push(`cold ${formatMs(timing.firstEventMs)}`);
+  if (timing.ttftMs != null)       parts.push(`ttft ${formatMs(timing.ttftMs)}`);
+  if (timing.streamMs != null)     parts.push(`gen ${formatMs(timing.streamMs)}`);
+  if (timing.toolMs > 0)           parts.push(`tool ${formatMs(timing.toolMs)}`);
+  if (timing.retryMs > 0)          parts.push(`retry ${formatMs(timing.retryMs)}`);
+  if (timing.tokensPerSec != null) parts.push(`${timing.tokensPerSec} tok/s`);
+  return parts.join(" · ");
+}
