@@ -34,7 +34,14 @@ import {
   renderStoredJobResult,
   renderCancelReport,
 } from "./lib/render.mjs";
-import { getConfig, readJobFile, resolveJobFile, setConfig, upsertJob } from "./lib/state.mjs";
+import { getConfig, listJobs, readJobFile, readTimingHistory, resolveJobFile, setConfig, upsertJob } from "./lib/state.mjs";
+import {
+  renderSingleJobDetail,
+  renderAggregateTable,
+  renderHistoryTable,
+  computeAggregateStats,
+  filterHistory,
+} from "./lib/timing.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SELF = fileURLToPath(import.meta.url);
@@ -64,6 +71,7 @@ function printUsage() {
       "  gemini-companion.mjs status [job-id] [--all] [--wait] [--json]",
       "  gemini-companion.mjs result [job-id] [--json]",
       "  gemini-companion.mjs cancel [job-id] [--json]",
+      "  gemini-companion.mjs timing [job-id] [--history] [--stats] [--kind task|ask] [--last N] [--since ISO] [--json]",
     ].join("\n")
   );
 }
@@ -698,6 +706,76 @@ function handleCancel(argv) {
   );
 }
 
+// ── Timing ───────────────────────────────────────────────
+
+function handleTiming(argv) {
+  const { options, positionals } = parseArgs(argv, {
+    booleanOptions: ["json", "history", "stats"],
+    valueOptions: ["since", "kind", "last", "cwd"],
+  });
+
+  const cwd = resolveCwd(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const jobId = positionals[0] || null;
+
+  const modes = [!!jobId, !!options.history, !!options.stats].filter(Boolean).length;
+  if (modes > 1) {
+    outputResult(
+      options.json
+        ? { ok: false, error: "--history / --stats / <job-id> are mutually exclusive" }
+        : "Error: --history / --stats / <job-id> are mutually exclusive\n",
+      options.json
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const allRecords = readTimingHistory();
+
+  if (jobId) {
+    const envelope = readJobFile(resolveJobFile(workspaceRoot, jobId));
+    const timing = envelope?.timing || allRecords.find((r) => r.jobId === jobId)?.timing || null;
+    const job = envelope?.id ? envelope : (listJobs(workspaceRoot).find((j) => j.id === jobId) || { id: jobId });
+    outputResult(
+      options.json
+        ? {
+            job: { id: job.id, kind: job.kind, status: job.status },
+            timing,
+            fallback: Array.isArray(timing?.usage) && timing.usage.length > 1,
+          }
+        : renderSingleJobDetail({ job, timing }),
+      options.json
+    );
+    return;
+  }
+
+  if (options.stats) {
+    const rows = filterHistory(allRecords, {
+      kind: options.kind,
+      since: options.since,
+    });
+    const stats = computeAggregateStats(rows);
+    outputResult(
+      options.json
+        ? { kind: options.kind || "all", ...stats, since: options.since || null }
+        : renderAggregateTable(stats, { kind: options.kind || "all" }),
+      options.json
+    );
+    return;
+  }
+
+  // --history (default)
+  const rows = filterHistory(allRecords, {
+    kind: options.kind,
+    since: options.since,
+    last: options.last ? parseInt(options.last, 10) : 20,
+  });
+  outputResult(
+    options.json ? { rows, count: rows.length } : renderHistoryTable(rows),
+    options.json
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────
 
 async function main() {
@@ -732,6 +810,9 @@ async function main() {
       break;
     case "cancel":
       handleCancel(subArgv);
+      break;
+    case "timing":
+      handleTiming(subArgv);
       break;
     case "_worker": {
       // Internal: legacy background worker (CLI re-entry, used by review)
