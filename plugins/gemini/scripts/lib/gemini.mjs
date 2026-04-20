@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { binaryAvailable, runCommand } from "./process.mjs";
+import { TimingAccumulator } from "./timing.mjs";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const AUTH_CHECK_TIMEOUT_MS = 30_000;
@@ -220,11 +221,15 @@ export function callGeminiStreaming({
     prompt, model, approvalMode, outputFormat: "stream-json", resumeSessionId, extraArgs,
   });
 
+  const timing = new TimingAccumulator({ spawnedAt: Date.now(), prompt });
+  const effectiveModelName = model || getSettingsModel();
+  if (effectiveModelName) timing.setRequestedModel(effectiveModelName);
+
   return new Promise((resolve) => {
     const child = spawn("gemini", args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: { ...process.env, GEMINI_TELEMETRY_ENABLED: "1" },
     });
 
     let sessionId = null;
@@ -274,16 +279,39 @@ export function callGeminiStreaming({
         return; // Not valid JSON — skip
       }
 
+      timing.onFirstEvent();
+
+      // Close any open retry window: retries are marked by non-fatal `error` events
+      // and terminate on the next non-error event.
+      if (event.type !== "error" && timing._retryStart != null) {
+        timing.onRetryEnd();
+      }
+
       try { onEvent(event); } catch { /* callback errors don't break us */ }
 
       if (event.type === "init") {
         sessionId = event.session_id || null;
+        if (event.model) timing.setRequestedModel(event.model);
       } else if (event.type === "message" && event.role === "assistant") {
+        if (event.content != null && event.content.length > 0) {
+          timing.onFirstToken();
+          timing.onLastToken();
+          timing.recordResponseBytes(Buffer.byteLength(event.content, "utf8"));
+        }
         if (event.content != null) {
           responseChunks.push(event.content);
         }
       } else if (event.type === "result") {
         stats = event.stats || null;
+        timing.onResult(event);
+      } else if (event.type === "tool_use") {
+        timing.onToolUseStart();
+      } else if (event.type === "tool_result") {
+        timing.onToolResult();
+      } else if (event.type === "error" && !event.fatal) {
+        timing.onRetryStart();
+      } else if (event.type === "gemini_cli.startup_stats") {
+        timing.onStartupStats(event);
       }
     }
 
@@ -297,10 +325,17 @@ export function callGeminiStreaming({
         lineBuffer = "";
       }
 
+      timing.onClose(Date.now(), {
+        exitCode,
+        timedOut,
+        signal: child.signalCode || null,
+      });
+
       if (timedOut) {
         resolve({
           ok: false,
           error: `Gemini timed out after ${Math.round(timeout / 1000)}s. Try a smaller scope.`,
+          timing: timing.build(),
         });
         return;
       }
@@ -311,6 +346,7 @@ export function callGeminiStreaming({
         if (responseChunks.length > 0) {
           stderrResult.partialResponse = responseChunks.join("");
         }
+        stderrResult.timing = timing.build();
         resolve(stderrResult);
         return;
       }
@@ -324,6 +360,7 @@ export function callGeminiStreaming({
         response,
         sessionId,
         stats,
+        timing: timing.build(),
       });
     });
 
