@@ -22,6 +22,7 @@ import {
   runStreamingJobInBackground,
   runStreamingWorker,
   runWorker,
+  SESSION_ID_ENV,
   waitForJob,
 } from "./lib/job-control.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
@@ -34,7 +35,7 @@ import {
   renderStoredJobResult,
   renderCancelReport,
 } from "./lib/render.mjs";
-import { getConfig, listJobs, readJobFile, readTimingHistory, resolveJobFile, setConfig, upsertJob } from "./lib/state.mjs";
+import { appendTimingHistory, getConfig, listJobs, readJobFile, readTimingHistory, resolveJobFile, setConfig, upsertJob } from "./lib/state.mjs";
 import {
   renderSingleJobDetail,
   renderAggregateTable,
@@ -238,6 +239,18 @@ async function handleAsk(argv) {
     approvalMode,
     cwd,
   });
+
+  if (result?.timing) {
+    const workspaceRoot = resolveWorkspaceRoot(cwd);
+    appendTimingHistory({
+      ts: new Date().toISOString(),
+      jobId: `gfg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: "ask",
+      workspace: workspaceRoot,
+      sessionId: process.env[SESSION_ID_ENV] || null,
+      timing: result.timing,
+    });
+  }
 
   outputResult(
     options.json ? result : renderGeminiResult(result),
@@ -554,6 +567,17 @@ async function handleTask(argv) {
       phase: "done",
       geminiSessionId: result.sessionId,
       pid: null,
+    });
+  }
+
+  if (result?.timing) {
+    appendTimingHistory({
+      ts: new Date().toISOString(),
+      jobId: `gfg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: "task",
+      workspace: workspaceRoot,
+      sessionId: process.env[SESSION_ID_ENV] || null,
+      timing: result.timing,
     });
   }
 
