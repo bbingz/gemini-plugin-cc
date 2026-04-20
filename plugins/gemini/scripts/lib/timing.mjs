@@ -192,3 +192,58 @@ export function renderStatusSummaryLine(timing) {
   if (timing.tokensPerSec != null) parts.push(`${timing.tokensPerSec} tok/s`);
   return parts.join(" · ");
 }
+
+function formatBytes(n) {
+  if (n == null) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function renderSingleJobDetail({ job, timing }) {
+  if (!timing) {
+    return `Job ${job?.id || "?"} has no timing data.`;
+  }
+  const lines = [];
+  lines.push(`Job ${job?.id || "?"} · ${job?.kind || "?"} · ${job?.status || "?"}`);
+  lines.push(`  Prompt      ${formatBytes(timing.promptBytes)}`);
+  lines.push(`  Response    ${formatBytes(timing.responseBytes)}`);
+  lines.push(`  Requested   ${timing.requestedModel || "—"}`);
+  if (timing.usage && timing.usage.length > 0) {
+    for (const u of timing.usage) {
+      const toks = (u.output + u.thoughts) / 1000;
+      lines.push(`  Actual      ${u.model}  (${toks.toFixed(0)}K tok)`);
+    }
+    if (timing.usage.length > 1) {
+      lines.push(`              ⚠ silent fallback detected`);
+    }
+  }
+  lines.push("");
+
+  const segs = [
+    ["cold",  timing.firstEventMs],
+    ["ttft",  timing.ttftMs],
+    ["gen",   timing.streamMs],
+    ["tool",  timing.toolMs],
+    ["retry", timing.retryMs],
+    ["tail",  timing.tailMs],
+  ].filter(([, v]) => v != null && v >= 0);
+  const total = timing.totalMs || 0;
+
+  for (const [name, ms] of segs) {
+    const bar = renderBar(ms, total, 20);
+    const pct = total > 0 ? ((ms / total) * 100).toFixed(1) : "0.0";
+    lines.push(`  ${name.padEnd(6)} ${bar}  ${formatMs(ms).padStart(8)}  (${pct.padStart(4)}%)`);
+  }
+  lines.push("  " + "─".repeat(36));
+  lines.push(`  total  ${" ".repeat(20)}  ${formatMs(total).padStart(8)}   100%`);
+  lines.push("");
+  if (timing.tokensPerSec != null) {
+    lines.push(`  Throughput: ${timing.tokensPerSec} tok/s  (includes thoughts)`);
+  }
+  if (timing.coldStartPhases && timing.coldStartPhases.length > 0) {
+    const parts = timing.coldStartPhases.map((p) => `${p.phase} ${formatMs(p.ms)}`).join(" · ");
+    lines.push(`  Cold-start breakdown: ${parts}`);
+  }
+  return lines.join("\n");
+}

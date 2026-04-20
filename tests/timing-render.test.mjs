@@ -53,3 +53,34 @@ test("renderStatusSummaryLine omits zero segments", async () => {
   assert.ok(!line.includes("tool"));
   assert.ok(!line.includes("retry"));
 });
+
+test("renderSingleJobDetail shows bars, segments, and fallback warning", async () => {
+  const { renderSingleJobDetail } = await import("../plugins/gemini/scripts/lib/timing.mjs");
+  const output = renderSingleJobDetail({
+    job: { id: "gt-abc", kind: "task", status: "done" },
+    timing: {
+      firstEventMs: 1800,
+      ttftMs: 18400,
+      streamMs: 220000,
+      toolMs: 180000,
+      retryMs: 32000,
+      tailMs: 200,
+      totalMs: 452400,
+      tokensPerSec: 16.3,
+      requestedModel: "gemini-3-pro-preview",
+      usage: [
+        { model: "gemini-3.1-pro-preview", input: 12400, output: 3200, thoughts: 900 },
+        { model: "gemini-3-flash-preview", input: 48000, output: 7040, thoughts: 0 },
+      ],
+      promptBytes: 12034,
+      responseBytes: 28516,
+      coldStartPhases: [{ phase: "runtime", ms: 420 }, { phase: "config", ms: 180 }],
+    },
+  });
+  assert.ok(output.includes("gt-abc"));
+  assert.ok(output.includes("cold"));
+  assert.ok(output.includes("ttft"));
+  assert.ok(output.includes("gen"));
+  assert.ok(output.includes("silent fallback"));   // warning when usage.length > 1
+  assert.ok(output.includes("Cold-start breakdown"));
+});
