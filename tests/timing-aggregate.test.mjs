@@ -56,3 +56,26 @@ test("computeAggregateStats identifies slowest job", async () => {
   assert.equal(stats.slowest.jobId, "b");
   assert.equal(stats.slowest.totalMs, 500);
 });
+
+test("renderAggregateTable includes header, percentile rows, fallback rate", async () => {
+  const { renderAggregateTable } = await import("../plugins/gemini/scripts/lib/timing.mjs");
+  const stats = {
+    n: 34,
+    percentiles: {
+      p50: { firstEventMs: 1900, ttftMs: 19200, streamMs: 130000, toolMs: 0, retryMs: 0, totalMs: 155000 },
+      p95: { firstEventMs: 3100, ttftMs: 42000, streamMs: 495000, toolMs: 240000, retryMs: 80000, totalMs: 543000 },
+      p99: null,
+    },
+    slowest: { jobId: "gt-xyz", totalMs: 588000, fallback: true },
+    fallbackRate: 0.235,
+  };
+  const output = renderAggregateTable(stats, { kind: "task" });
+  assert.ok(output.includes("task"));
+  assert.ok(output.includes("n=34"));
+  assert.ok(output.includes("p50"));
+  assert.ok(output.includes("p95"));
+  assert.ok(output.includes("p99"));
+  assert.ok(output.includes("—"));               // p99 suppressed
+  assert.ok(output.includes("gt-xyz"));
+  assert.ok(output.includes("23.5%"));
+});

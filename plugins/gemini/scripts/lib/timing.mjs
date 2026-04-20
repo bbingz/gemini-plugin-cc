@@ -306,3 +306,26 @@ export function computeAggregateStats(records) {
 
   return { n, percentiles, slowest, fallbackRate };
 }
+
+export function renderAggregateTable(stats, { kind = "all" } = {}) {
+  const lines = [];
+  lines.push(`${kind} (n=${stats.n})`);
+  lines.push(`                   cold        ttft        gen         tool        retry       total`);
+  for (const p of ["p50", "p95", "p99"]) {
+    const row = stats.percentiles[p];
+    if (!row) {
+      lines.push(`  ${p.padEnd(14)}  —           —           —           —           —           —`);
+      continue;
+    }
+    const cells = ["firstEventMs", "ttftMs", "streamMs", "toolMs", "retryMs", "totalMs"]
+      .map((m) => formatMs(row[m]).padEnd(12))
+      .join("");
+    lines.push(`  ${p.padEnd(14)}  ${cells}`);
+  }
+  if (stats.slowest) {
+    const fb = stats.slowest.fallback ? " · fallback" : "";
+    lines.push(`  slowest         ${stats.slowest.jobId} · ${formatMs(stats.slowest.totalMs)}${fb}`);
+  }
+  lines.push(`  fallback rate   ${(stats.fallbackRate * 100).toFixed(1)}%`);
+  return lines.join("\n");
+}
