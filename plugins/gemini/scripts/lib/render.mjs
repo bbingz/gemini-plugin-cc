@@ -64,11 +64,11 @@ export function renderGeminiResult(result) {
   if (models) {
     const modelName = Object.keys(models)[0];
     if (modelName) {
-      const tokens = models[modelName]?.tokens;
-      if (tokens) {
+      const m = models[modelName];
+      if (m) {
         lines.push("");
         lines.push(
-          `---\n*Model: ${modelName} | Tokens: ${tokens.total?.toLocaleString() ?? "?"} (input: ${tokens.input?.toLocaleString() ?? "?"}, cached: ${tokens.cached?.toLocaleString() ?? "0"}) | Latency: ${models[modelName]?.api?.totalLatencyMs ?? "?"}ms*`
+          `---\n*Model: ${modelName} | Tokens: ${m.total_tokens?.toLocaleString() ?? "?"} (input: ${m.input_tokens?.toLocaleString() ?? "?"}, cached: ${m.cached?.toLocaleString() ?? "0"}) | Latency: ${m?.api?.totalLatencyMs ?? "?"}ms*`
         );
       }
     }
@@ -128,6 +128,7 @@ export function renderStatusReport(snapshot, workspaceRoot = null) {
     lines.push("\n## Recent Jobs\n");
     lines.push("| Job ID | Type | Status | Phase | Duration |");
     lines.push("|--------|------|--------|-------|----------|");
+    const finishedTimings = [];
     for (const job of snapshot.recent) {
       lines.push(
         `| \`${job.id}\` | ${job.kindLabel} | ${job.status} | ${job.phase || "-"} | ${job.elapsed || "?"} |`
@@ -137,11 +138,18 @@ export function renderStatusReport(snapshot, workspaceRoot = null) {
           const envelope = readJobFile(resolveJobFile(workspaceRoot, job.id));
           const timing = envelope?.timing ?? null;
           if (timing) {
-            lines.push("  " + renderStatusSummaryLine(timing));
+            finishedTimings.push({ id: job.id, summary: renderStatusSummaryLine(timing) });
           }
         } catch {
-          // ignore — legacy jobs or missing files render without timing
+          // ignore — legacy or missing envelopes render without timing
         }
+      }
+    }
+    // After the table: collected timing breakdown as a list (safe for markdown)
+    if (finishedTimings.length > 0) {
+      lines.push("\n**Timing breakdown:**\n");
+      for (const t of finishedTimings) {
+        lines.push(`- \`${t.id}\` — ${t.summary}`);
       }
     }
 

@@ -229,7 +229,11 @@ export function callGeminiStreaming({
     const child = spawn("gemini", args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, GEMINI_TELEMETRY_ENABLED: "1" },
+      env: {
+        ...process.env,
+        GEMINI_TELEMETRY_ENABLED: "1",
+        GEMINI_CLI_TELEMETRY: "1",
+      },
     });
 
     let sessionId = null;
@@ -291,6 +295,8 @@ export function callGeminiStreaming({
 
       if (event.type === "init") {
         sessionId = event.session_id || null;
+        // setRequestedModel is first-wins; callers already seeded from settings.json.
+        // init.model here is a best-effort override only if we had nothing.
         if (event.model) timing.setRequestedModel(event.model);
       } else if (event.type === "message" && event.role === "assistant") {
         if (event.content != null && event.content.length > 0) {
@@ -304,13 +310,13 @@ export function callGeminiStreaming({
       } else if (event.type === "result") {
         stats = event.stats || null;
         timing.onResult(event);
-      } else if (event.type === "tool_use") {
+      } else if (event.type === "tool_use" || event.type === "tool_call") {
         timing.onToolUseStart();
-      } else if (event.type === "tool_result") {
+      } else if (event.type === "tool_result" || event.type === "tool_response") {
         timing.onToolResult();
-      } else if (event.type === "error" && !event.fatal) {
+      } else if (event.type === "error" && event.fatal === false) {
         timing.onRetryStart();
-      } else if (event.type === "gemini_cli.startup_stats") {
+      } else if (event.type === "gemini_cli.startup_stats" || event.type === "startup_stats") {
         timing.onStartupStats(event);
       }
     }

@@ -232,11 +232,15 @@ const TIMING_LOCK_ACQUIRE_MS = 10_000;
 const TIMING_MAX_BYTES = 10 * 1024 * 1024;
 
 export function resolveTimingHistoryFile() {
-  return path.join(stateRootDir(), "..", TIMING_FILE_NAME);
+  const pluginData = process.env[PLUGIN_DATA_ENV];
+  if (pluginData) return path.join(pluginData, TIMING_FILE_NAME);
+  return path.join(FALLBACK_STATE_ROOT_DIR, TIMING_FILE_NAME);
 }
 
 function resolveTimingLockFile() {
-  return path.join(stateRootDir(), "..", TIMING_LOCK_NAME);
+  const pluginData = process.env[PLUGIN_DATA_ENV];
+  if (pluginData) return path.join(pluginData, TIMING_LOCK_NAME);
+  return path.join(FALLBACK_STATE_ROOT_DIR, TIMING_LOCK_NAME);
 }
 
 function acquireTimingLock() {
