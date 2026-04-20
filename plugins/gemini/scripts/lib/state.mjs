@@ -224,6 +224,88 @@ export function removeJobFile(jobFile) {
   removeFileIfExists(jobFile);
 }
 
+// ── Timing history (global) ──────────────────────────────
+
+const TIMING_FILE_NAME = "timings.ndjson";
+const TIMING_LOCK_NAME = "timings.ndjson.lock";
+const TIMING_LOCK_ACQUIRE_MS = 10_000;
+
+export function resolveTimingHistoryFile() {
+  return path.join(stateRootDir(), "..", TIMING_FILE_NAME);
+}
+
+function resolveTimingLockFile() {
+  return path.join(stateRootDir(), "..", TIMING_LOCK_NAME);
+}
+
+function acquireTimingLock() {
+  const lockFile = resolveTimingLockFile();
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  const deadline = Date.now() + TIMING_LOCK_ACQUIRE_MS;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.closeSync(fd);
+      return lockFile;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      // Sleep spin
+      const until = Date.now() + 25;
+      while (Date.now() < until) { /* spin */ }
+      // Clean stale lock (>30s old)
+      try {
+        const st = fs.statSync(lockFile);
+        if (Date.now() - st.mtimeMs > 30_000) removeFileIfExists(lockFile);
+      } catch { /* gone */ }
+    }
+  }
+  return null;
+}
+
+function releaseTimingLock() {
+  removeFileIfExists(resolveTimingLockFile());
+}
+
+export function appendTimingHistory(record) {
+  const file = resolveTimingHistoryFile();
+  const lock = acquireTimingLock();
+  if (!lock) {
+    try { process.stderr.write(`[timing] lock acquire timeout; dropping record ${record?.jobId || "?"}\n`); } catch { /* ignore */ }
+    return false;
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const line = JSON.stringify(record) + "\n";
+    fs.appendFileSync(file, line);
+    return true;
+  } catch (e) {
+    try { process.stderr.write(`[timing] append failed: ${e.message}\n`); } catch { /* ignore */ }
+    return false;
+  } finally {
+    releaseTimingLock();
+  }
+}
+
+export function readTimingHistory() {
+  const file = resolveTimingHistoryFile();
+  let content;
+  try {
+    content = fs.readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      // skip corrupted line
+    }
+  }
+  return out;
+}
+
 // ── Config operations ────────────────────────────────────
 
 export function getConfig(workspaceRoot) {
