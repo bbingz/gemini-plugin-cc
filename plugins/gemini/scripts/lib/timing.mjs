@@ -329,3 +329,37 @@ export function renderAggregateTable(stats, { kind = "all" } = {}) {
   lines.push(`  fallback rate   ${(stats.fallbackRate * 100).toFixed(1)}%`);
   return lines.join("\n");
 }
+
+export function filterHistory(records, { kind, last, since } = {}) {
+  let out = records.slice();
+  if (kind) out = out.filter((r) => r.kind === kind);
+  if (since) out = out.filter((r) => r.ts && r.ts >= since);
+  // Newest first
+  out.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+  if (last) out = out.slice(0, last);
+  return out;
+}
+
+export function renderHistoryTable(rows) {
+  const lines = [];
+  lines.push("id              kind    total      cold    ttft    gen     tool    retry   tok/s   fb   completedAt");
+  for (const r of rows) {
+    const t = r.timing || {};
+    const fb = (t.usage?.length || 0) > 1 ? "!" : " ";
+    lines.push([
+      (r.jobId || "?").padEnd(16),
+      (r.kind || "?").padEnd(8),
+      formatMs(t.totalMs).padEnd(10),
+      formatMs(t.firstEventMs).padEnd(8),
+      formatMs(t.ttftMs).padEnd(8),
+      formatMs(t.streamMs).padEnd(8),
+      formatMs(t.toolMs).padEnd(8),
+      formatMs(t.retryMs).padEnd(8),
+      (t.tokensPerSec != null ? `${t.tokensPerSec}` : "—").padEnd(8),
+      fb,
+      "  ",
+      (r.ts || "—").slice(0, 19),
+    ].join(""));
+  }
+  return lines.join("\n");
+}

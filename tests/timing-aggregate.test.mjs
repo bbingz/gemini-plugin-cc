@@ -57,6 +57,39 @@ test("computeAggregateStats identifies slowest job", async () => {
   assert.equal(stats.slowest.totalMs, 500);
 });
 
+test("filterHistory applies kind + last + since", async () => {
+  const { filterHistory } = await import("../plugins/gemini/scripts/lib/timing.mjs");
+  const records = [
+    { ts: "2026-04-01T00:00:00Z", kind: "task", jobId: "a" },
+    { ts: "2026-04-15T00:00:00Z", kind: "ask",  jobId: "b" },
+    { ts: "2026-04-20T00:00:00Z", kind: "task", jobId: "c" },
+    { ts: "2026-04-20T01:00:00Z", kind: "task", jobId: "d" },
+  ];
+  // kind filter
+  assert.equal(filterHistory(records, { kind: "task" }).length, 3);
+  // since filter
+  assert.equal(filterHistory(records, { since: "2026-04-16T00:00:00Z" }).length, 2);
+  // last N (newest first)
+  const last2 = filterHistory(records, { last: 2 });
+  assert.equal(last2.length, 2);
+  assert.equal(last2[0].jobId, "d");    // newest first
+});
+
+test("renderHistoryTable lists rows with segment columns", async () => {
+  const { renderHistoryTable } = await import("../plugins/gemini/scripts/lib/timing.mjs");
+  const rows = [{
+    jobId: "gt-abc", kind: "task", ts: "2026-04-20T00:00:00Z",
+    timing: {
+      firstEventMs: 1800, ttftMs: 18400, streamMs: 100000, toolMs: 0, retryMs: 0,
+      totalMs: 120200, tokensPerSec: 16.3, usage: [{}],
+    },
+  }];
+  const output = renderHistoryTable(rows);
+  assert.ok(output.includes("gt-abc"));
+  assert.ok(output.includes("task"));
+  assert.ok(output.includes("2026-04-20"));
+});
+
 test("renderAggregateTable includes header, percentile rows, fallback rate", async () => {
   const { renderAggregateTable } = await import("../plugins/gemini/scripts/lib/timing.mjs");
   const stats = {
