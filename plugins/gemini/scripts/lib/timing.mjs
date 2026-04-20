@@ -49,6 +49,15 @@ export class TimingAccumulator {
     }
   }
 
+  onStartupStats(event) {
+    if (event && Array.isArray(event.phases)) {
+      this._coldStartPhases = event.phases.map((p) => ({
+        phase: String(p.phase || "unknown"),
+        ms: Number(p.ms) || 0,
+      }));
+    }
+  }
+
   setRequestedModel(m) {
     this._requestedModel = m || null;
   }
@@ -138,7 +147,7 @@ export class TimingAccumulator {
       requestedModel: this._requestedModel || null,
       usage,
       tokensPerSec,
-      coldStartPhases: null,
+      coldStartPhases: this._coldStartPhases || null,
     };
   }
 }

@@ -131,3 +131,32 @@ test("missing token fields leave tokensPerSec null", () => {
   acc.onClose(1210, { exitCode: 0 });
   assert.equal(acc.build().tokensPerSec, null);
 });
+
+test("onStartupStats populates coldStartPhases verbatim", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onStartupStats({
+    phases: [
+      { phase: "runtime", ms: 420 },
+      { phase: "config",  ms: 180 },
+    ],
+  });
+  acc.onFirstEvent(700);
+  acc.onFirstToken(900);
+  acc.onLastToken(1000);
+  acc.onClose(1010, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.deepEqual(t.coldStartPhases, [
+    { phase: "runtime", ms: 420 },
+    { phase: "config", ms: 180 },
+  ]);
+});
+
+test("no startup_stats event leaves coldStartPhases null", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(300);
+  acc.onClose(310, { exitCode: 0 });
+  assert.equal(acc.build().coldStartPhases, null);
+});
