@@ -5,6 +5,7 @@ import process from "node:process";
 
 import { callGeminiStreaming } from "./gemini.mjs";
 import {
+  appendTimingHistory,
   ensureStateDir,
   generateJobId,
   listJobs,
@@ -215,12 +216,27 @@ export async function runStreamingWorker(jobId, workspaceRoot, config) {
   const phase = result.ok ? "done" : "failed";
   const geminiSessionId = result.sessionId || null;
 
+  const timing = result.timing || null;
+
   writeJobFile(workspaceRoot, jobId, {
     id: jobId,
     status,
     result,
+    timing,
     completedAt: now,
   });
+
+  if (timing) {
+    const jobRecord = listJobs(workspaceRoot).find((j) => j.id === jobId);
+    appendTimingHistory({
+      ts: now,
+      jobId,
+      kind: jobRecord?.kind || "task",
+      workspace: workspaceRoot,
+      sessionId: process.env[SESSION_ID_ENV] || null,
+      timing,
+    });
+  }
 
   // Atomically update only if not cancelled (avoid overwriting user cancel)
   updateState(workspaceRoot, (state) => {
