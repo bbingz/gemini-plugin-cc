@@ -160,3 +160,34 @@ test("no startup_stats event leaves coldStartPhases null", () => {
   acc.onClose(310, { exitCode: 0 });
   assert.equal(acc.build().coldStartPhases, null);
 });
+
+test("timeout → terminationReason=timeout, timedOut=true", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onClose(60_000, { timedOut: true, exitCode: null });
+  const t = acc.build();
+  assert.equal(t.terminationReason, "timeout");
+  assert.equal(t.timedOut, true);
+  assert.equal(t.ttftMs, null);
+  assert.equal(t.streamMs, 0);     // no stream reached
+});
+
+test("signal → terminationReason=signal, signal name recorded", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(300);
+  acc.onClose(310, { signal: "SIGINT", exitCode: null });
+  const t = acc.build();
+  assert.equal(t.terminationReason, "signal");
+  assert.equal(t.signal, "SIGINT");
+});
+
+test("non-zero exit → terminationReason=error", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onClose(200, { exitCode: 1 });
+  const t = acc.build();
+  assert.equal(t.terminationReason, "error");
+  assert.equal(t.exitCode, 1);
+});
