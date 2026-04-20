@@ -229,6 +229,7 @@ export function removeJobFile(jobFile) {
 const TIMING_FILE_NAME = "timings.ndjson";
 const TIMING_LOCK_NAME = "timings.ndjson.lock";
 const TIMING_LOCK_ACQUIRE_MS = 10_000;
+const TIMING_MAX_BYTES = 10 * 1024 * 1024;
 
 export function resolveTimingHistoryFile() {
   return path.join(stateRootDir(), "..", TIMING_FILE_NAME);
@@ -294,6 +295,27 @@ export function appendTimingHistory(record) {
 
     const line = (needsLeadingNewline ? "\n" : "") + JSON.stringify(record) + "\n";
     fs.appendFileSync(file, line);
+
+    // Trim if over size threshold
+    try {
+      const st = fs.statSync(file);
+      if (st.size > TIMING_MAX_BYTES) {
+        const raw = fs.readFileSync(file, "utf8");
+        const lines = raw.split("\n").filter(Boolean);
+        // Keep only valid JSON lines
+        const valid = [];
+        for (const l of lines) {
+          try { JSON.parse(l); valid.push(l); } catch { /* drop */ }
+        }
+        const keep = valid.slice(Math.floor(valid.length / 2));
+        const tmp = file + ".tmp";
+        fs.writeFileSync(tmp, keep.join("\n") + "\n");
+        fs.renameSync(tmp, file);
+      }
+    } catch (e) {
+      try { process.stderr.write(`[timing] trim failed: ${e.message}\n`); } catch { /* ignore */ }
+    }
+
     return true;
   } catch (e) {
     try { process.stderr.write(`[timing] append failed: ${e.message}\n`); } catch { /* ignore */ }

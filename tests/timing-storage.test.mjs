@@ -45,3 +45,33 @@ test("append after a partial-line file prepends newline to recover", () => {
   // The partial line is corrupt and skipped; new line is recoverable
   assert.ok(rows.some((r) => r.jobId === "gt-after"));
 });
+
+test("file exceeding 10MB is trimmed to newest 50%", () => {
+  const file = resolveTimingHistoryFile();
+  fs.writeFileSync(file, "");  // reset
+
+  // Write ~11MB of 300-byte records (~36k records)
+  const chunk = JSON.stringify({ jobId: "g-x".padEnd(280, "x") }) + "\n";
+  const fd = fs.openSync(file, "a");
+  try {
+    const target = 11 * 1024 * 1024;
+    const chunkBytes = Buffer.byteLength(chunk, "utf8");
+    const count = Math.ceil(target / chunkBytes);
+    for (let i = 0; i < count; i++) fs.writeSync(fd, chunk);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const beforeSize = fs.statSync(file).size;
+  assert.ok(beforeSize > 10 * 1024 * 1024);
+
+  // This append triggers trim
+  appendTimingHistory({ jobId: "gt-trigger-trim" });
+
+  const afterSize = fs.statSync(file).size;
+  assert.ok(afterSize < beforeSize, `expected trim, got ${afterSize} vs ${beforeSize}`);
+  assert.ok(afterSize < 10 * 1024 * 1024 * 0.7, "trimmed file should be under 70% of threshold");
+
+  const rows = readTimingHistory();
+  assert.ok(rows.some((r) => r.jobId === "gt-trigger-trim"), "new record survives trim");
+});
