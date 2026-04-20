@@ -63,6 +63,7 @@ export class TimingAccumulator {
   }
 
   onResult(resultEvent) {
+    if (this._usage) return;   // first-wins idempotence
     const stats = resultEvent?.stats || {};
     if (Array.isArray(stats.per_model_usage) && stats.per_model_usage.length > 0) {
       this._usage = stats.per_model_usage.map((u) => ({
@@ -130,7 +131,8 @@ export class TimingAccumulator {
       : null;
 
     const sum = (firstEventMs || 0) + (ttftMs || 0) + streamMs + this._toolMs + this._retryMs + (tailMs || 0);
-    const invariantOk = sum === totalMs;
+    const isCleanExit = this._termination.reason === "exit";
+    const invariantOk = isCleanExit ? (sum === totalMs) : null;
 
     return {
       spawnedAt: new Date(spawned).toISOString(),

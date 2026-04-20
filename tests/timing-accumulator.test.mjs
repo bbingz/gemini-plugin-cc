@@ -216,3 +216,40 @@ test("build() exposes invariant via explicit property for runtime assertions", (
   acc.onClose(310, { exitCode: 0 });
   assert.equal(acc.build().invariantOk, true);
 });
+
+test("onResult is idempotent — first call wins, second is ignored", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(1200);
+  acc.onResult({ stats: { input_token_count: 100, output_token_count: 200, thoughts_token_count: 0 } });
+  acc.onResult({ stats: { input_token_count: 9999, output_token_count: 9999, thoughts_token_count: 9999 } });
+  acc.onClose(1210, { exitCode: 0 });
+
+  const t = acc.build();
+  assert.equal(t.usage[0].input, 100);   // first call wins
+  assert.equal(t.usage[0].output, 200);
+});
+
+test("invariantOk is null on timeout path (only meaningful on clean exit)", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onClose(60_000, { timedOut: true, exitCode: null });
+  assert.equal(acc.build().invariantOk, null);
+});
+
+test("invariantOk is null on signal path", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onFirstToken(200);
+  acc.onLastToken(300);
+  acc.onClose(310, { signal: "SIGINT", exitCode: null });
+  assert.equal(acc.build().invariantOk, null);
+});
+
+test("invariantOk is null on non-zero exit", () => {
+  const acc = new TimingAccumulator({ spawnedAt: 0 });
+  acc.onFirstEvent(100);
+  acc.onClose(200, { exitCode: 1 });
+  assert.equal(acc.build().invariantOk, null);
+});
