@@ -163,6 +163,8 @@ if (stats.models && typeof stats.models === "object" && !Array.isArray(stats.mod
 
 fallback 路径（旧版 CLI 只吐平铺 `stats.input_tokens`）被保留，回填 `model = requestedModel ?? "unknown"`。
 
+**前置条件（sibling 注意）**：这一检测路径 **要求 CLI 在 result 事件里吐 per-model usage 映射**（Gemini CLI 的 `stats.models`）。并非所有 sibling CLI 都具备这个能力——kimi-cli 1.x 未暴露（2026-04-22），Mini-Agent 0.1.0 日志 RESPONSE block 只有 `finish_reason`。如果上游 CLI 无此字段，本节的"A 卷"取证**无法照搬**，需要先做 CLI probe 确认能否观测到"请求的模型 ≠ 实际计费的模型"这一数据源。这是架构受限，不是插件可自行补齐的差距。
+
 ### 6.4 全局历史（timings.ndjson）
 
 - 路径：`~/.claude/plugins/data/gemini-gemini-plugin/timings.ndjson`（**跨 workspace 共享**）
@@ -248,6 +250,7 @@ fallback 路径（旧版 CLI 只吐平铺 `stats.input_tokens`）被保留，回
 4. **workspace 隔离是底线**：多 worktree 开发是常态，state 必须 keyed by workspace，否则任务会串。
 5. **sum-invariant 自检**：6 段相加必须等于总时长。这种代数不变量比任何单测都更能发现 dispatch 漏事件。
 6. **markdown-safe 输出**：Claude Code 会把插件输出直接塞进对话流。fence / backtick / 表格对齐都得考虑。
+7. **CHANGELOG 权威性排序**（跨插件审计注意）：仓库根 `CHANGELOG.md` + `plugins/*/plugin.json` version 字段是**权威**；`plugins/*/CHANGELOG.md` 子 changelog 可能滞后。**审计 sibling 状态时以 repo-root 和 plugin.json 为准**，不要从子 changelog 推断"Phase N in progress"，否则会踩 stale-drift 坑（2026-04-21 我读 kimi `plugins/kimi/CHANGELOG.md` 时就中过一次）。
 
 ---
 
@@ -258,9 +261,10 @@ fallback 路径（旧版 CLI 只吐平铺 `stats.input_tokens`）被保留，回
 - **Engram sidecar 深度集成**：目前只做到了 "deterministic Claude Code parent link"，没把 timing 写进 engram 的 `save_insight`
 - **跨插件 timing 可对比**：如果三家都采纳 timings.ndjson 同 schema，可以做一个上层 dashboard 比较 cold/ttft 分布
 - **A/B 模型切换**：当下只有"记录降级"，没"触发切换"（比如检测到 Pro→Flash 时自动提示用户调档）
+- **Review 从 `gemini.mjs` 抽出**：当前 sync review 和 streaming ask/task 在同一文件，耦合偏重。未来抽取时可参考 kimi 插件的"薄 CLI-specific adapter（`callKimiReview` / `callKimiAdversarialReview`）→ 厚共享 pipeline（`scripts/lib/review.mjs` 里的 `runReviewPipeline`）"形状，schema 校验 + retry + fallback 全部下沉到 pipeline，adapter 只负责 CLI 特异性。
 
 这些不在 0.6.0 范围，写在这里只是让你们知道我在想什么。
 
 ---
 
-**更新节奏**：每次 `plugins/gemini/plugin.json` version bump 时，这份 baseline 也要相应更新。当前锚点：**v0.6.0 / 2026-04-21**。
+**更新节奏**：每次 `plugins/gemini/plugin.json` version bump 时，这份 baseline 也要相应更新。当前锚点：**v0.6.0 / 2026-04-21**（2026-04-22 annotations: kimi §8.3 反馈——§6.3 per-model prerequisite / §10 原则 #7 CHANGELOG 权威性 / §11 review 抽取参考）。
