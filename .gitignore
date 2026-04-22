@@ -9,3 +9,6 @@ node_modules/
 
 # Context
 .context/
+
+# Claude Code runtime (scheduled_tasks, settings.local, etc.)
+.claude/
