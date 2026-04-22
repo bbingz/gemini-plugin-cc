@@ -2,8 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { appendNdjson, readNdjson } from "../../../../../polycli/packages/polycli-utils/src/index.js";
-import { validateTimingRecord } from "../../../../../polycli/packages/polycli-timing/src/index.js";
 
 // ── Constants ────────────────────────────────────────────
 
@@ -229,6 +227,8 @@ export function removeJobFile(jobFile) {
 // ── Timing history (global) ──────────────────────────────
 
 const TIMING_FILE_NAME = "timings.ndjson";
+const TIMING_LOCK_NAME = "timings.ndjson.lock";
+const TIMING_LOCK_ACQUIRE_MS = 10_000;
 const TIMING_MAX_BYTES = 10 * 1024 * 1024;
 
 export function resolveTimingHistoryFile() {
@@ -237,74 +237,116 @@ export function resolveTimingHistoryFile() {
   return path.join(FALLBACK_STATE_ROOT_DIR, TIMING_FILE_NAME);
 }
 
-function classifyMetric(value) {
-  if (value == null) {
-    return { status: "missing", ms: null };
-  }
-  if (!Number.isFinite(value)) {
-    return { status: "missing", ms: null };
-  }
-  if (value === 0) {
-    return { status: "zero", ms: 0 };
-  }
-  return { status: "measured", ms: value };
+function resolveTimingLockFile() {
+  const pluginData = process.env[PLUGIN_DATA_ENV];
+  if (pluginData) return path.join(pluginData, TIMING_LOCK_NAME);
+  return path.join(FALLBACK_STATE_ROOT_DIR, TIMING_LOCK_NAME);
 }
 
-function buildTimingContractRecord(record) {
-  const timing = record?.timing;
-  if (!timing || typeof timing !== "object") {
-    return null;
+function acquireTimingLock() {
+  const lockFile = resolveTimingLockFile();
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  const deadline = Date.now() + TIMING_LOCK_ACQUIRE_MS;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.closeSync(fd);
+      return lockFile;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      // Sleep spin
+      const until = Date.now() + 25;
+      while (Date.now() < until) { /* spin */ }
+      // Clean stale lock (>30s old)
+      try {
+        const st = fs.statSync(lockFile);
+        if (Date.now() - st.mtimeMs > 30_000) removeFileIfExists(lockFile);
+      } catch { /* gone */ }
+    }
   }
+  return null;
+}
 
-  return {
-    version: 1,
-    provider: "gemini",
-    runtimePersistence: "ephemeral",
-    measurementScope: "request",
-    completedAt: record?.ts || new Date().toISOString(),
-    kind: record?.kind || "task",
-    meta: {
-      jobId: record?.jobId || null,
-      workspace: record?.workspace || null,
-      sessionId: record?.sessionId || null,
-    },
-    metrics: {
-      cold: classifyMetric(timing.firstEventMs),
-      ttft: classifyMetric(timing.ttftMs),
-      gen: classifyMetric(timing.streamMs),
-      tool: classifyMetric(timing.toolMs),
-      retry: classifyMetric(timing.retryMs),
-      tail: classifyMetric(timing.tailMs),
-      total: classifyMetric(timing.totalMs),
-    },
-  };
+function releaseTimingLock() {
+  removeFileIfExists(resolveTimingLockFile());
 }
 
 export function appendTimingHistory(record) {
   const file = resolveTimingHistoryFile();
-  const timingRecord = buildTimingContractRecord(record);
-  const validation = validateTimingRecord(timingRecord);
-  if (!validation.ok) {
-    try {
-      process.stderr.write(`[timing] invalid record ${record?.jobId || "?"}: ${validation.errors.join("; ")}\n`);
-    } catch { /* ignore */ }
+  const lock = acquireTimingLock();
+  if (!lock) {
+    try { process.stderr.write(`[timing] lock acquire timeout; dropping record ${record?.jobId || "?"}\n`); } catch { /* ignore */ }
     return false;
   }
-
   try {
-    return appendNdjson(file, { ...record, timingRecord }, {
-      maxBytes: TIMING_MAX_BYTES,
-      keepRatio: 0.5,
-    });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+
+    // Repair: if file ends without \n (prior crash), prepend one
+    let needsLeadingNewline = false;
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 0) {
+        const buf = Buffer.alloc(1);
+        const fd = fs.openSync(file, "r");
+        try {
+          fs.readSync(fd, buf, 0, 1, st.size - 1);
+        } finally {
+          fs.closeSync(fd);
+        }
+        if (buf[0] !== 0x0A /* \n */) needsLeadingNewline = true;
+      }
+    } catch { /* new file */ }
+
+    const line = (needsLeadingNewline ? "\n" : "") + JSON.stringify(record) + "\n";
+    fs.appendFileSync(file, line);
+
+    // Trim if over size threshold
+    try {
+      const st = fs.statSync(file);
+      if (st.size > TIMING_MAX_BYTES) {
+        const raw = fs.readFileSync(file, "utf8");
+        const lines = raw.split("\n").filter(Boolean);
+        // Keep only valid JSON lines
+        const valid = [];
+        for (const l of lines) {
+          try { JSON.parse(l); valid.push(l); } catch { /* drop */ }
+        }
+        const keep = valid.slice(Math.floor(valid.length / 2));
+        const tmp = file + ".tmp";
+        fs.writeFileSync(tmp, keep.join("\n") + "\n");
+        fs.renameSync(tmp, file);
+      }
+    } catch (e) {
+      try { process.stderr.write(`[timing] trim failed: ${e.message}\n`); } catch { /* ignore */ }
+    }
+
+    return true;
   } catch (e) {
     try { process.stderr.write(`[timing] append failed: ${e.message}\n`); } catch { /* ignore */ }
     return false;
+  } finally {
+    releaseTimingLock();
   }
 }
 
 export function readTimingHistory() {
   const file = resolveTimingHistoryFile();
-  return readNdjson(file);
+  let content;
+  try {
+    content = fs.readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      // skip corrupted line
+    }
+  }
+  return out;
 }
 
 // ── Config operations ────────────────────────────────────
