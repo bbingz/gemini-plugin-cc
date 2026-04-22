@@ -1,5 +1,9 @@
 # Changelog
 
+## docs(alignment/minimax + baseline) — 2026-04-22
+
+Record minimax v0.1.3 re-alignment pass in `docs/alignment/minimax.md §10`. MiniMax shipped v0.1.3 (tag + GitHub Release, 137 tests pass, T14 real-Mini-Agent hard gate 11/11 PASS). Verified all 4 axes from their `PROGRESS.md §Re-alignment signal`: (1) ndjson schema bytes-level compat with gemini `timing.build()` + `invariantKind: "3term"` discriminator, (2) SessionStart 4-branch sweep with 3d default + `MINIMAX_STALE_JOB_THRESHOLD_MS` env, (3) `/minimax:timing` three views + D7 dual-record contract, (4) `CLAUDE_PLUGIN_DATA` inheritance caveat uptake. Original P-findings terminal state: P0/P2/P3 CLOSED, P1 downgraded from gap to architectural constraint (permanent upstream limitation; minimax scope-decision to absorb internally rather than file issue), P4 remains N/A. Added design principle #8 to `docs/alignment/baseline.md §10` on sibling-plugin `CLAUDE_PLUGIN_DATA` env inheritance trap (minimax Finding 2 uptake).
+
 ## docs(alignment/baseline) — 2026-04-22
 
 Apply kimi §8.3 feedback to `docs/alignment/baseline.md`: (1) §6.3 主力模型使用验证 adds "CLI must emit per-model usage in result event" prerequisite caveat — sibling CLIs (kimi-cli 1.x, Mini-Agent 0.1.0) may lack this data source, making A-roll detection architecturally out-of-reach rather than a plugin gap; (2) §10 adds design principle #7 on CHANGELOG authority ordering (repo-root CHANGELOG + plugin.json are authoritative; plugin sub-CHANGELOG may drift — lesson from the 2026-04-21 "Phase 1 in progress" misread); (3) §11 adds a future-work bullet pointing at kimi's thin-adapter / thick-pipeline shape (`scripts/lib/review.mjs` + `runReviewPipeline`) as a reference when review is extracted from `gemini.mjs`.

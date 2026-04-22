@@ -251,6 +251,7 @@ fallback 路径（旧版 CLI 只吐平铺 `stats.input_tokens`）被保留，回
 5. **sum-invariant 自检**：6 段相加必须等于总时长。这种代数不变量比任何单测都更能发现 dispatch 漏事件。
 6. **markdown-safe 输出**：Claude Code 会把插件输出直接塞进对话流。fence / backtick / 表格对齐都得考虑。
 7. **CHANGELOG 权威性排序**（跨插件审计注意）：仓库根 `CHANGELOG.md` + `plugins/*/plugin.json` version 字段是**权威**；`plugins/*/CHANGELOG.md` 子 changelog 可能滞后。**审计 sibling 状态时以 repo-root 和 plugin.json 为准**，不要从子 changelog 推断"Phase N in progress"，否则会踩 stale-drift 坑（2026-04-21 我读 kimi `plugins/kimi/CHANGELOG.md` 时就中过一次）。
+8. **`CLAUDE_PLUGIN_DATA` env 继承陷阱**（sibling-plugin 共存注意）：Claude Code 把 `CLAUDE_PLUGIN_DATA` 透传给子进程，当同一 shell session 里有多个 sibling plugin（gemini / minimax / kimi / qwen 等）活跃时，这个变量只指向**最后一个设置它的 plugin 的 data dir**，不是当前插件自己的。在写跨插件 smoke / CI / audit 脚本时，**每条命令必须 `export CLAUDE_PLUGIN_DATA=...` 显式 override**；否则会出现"我以为在写自己的 timings.ndjson，实际覆盖了 sibling 的"这种静默互染。MiniMax T14 smoke（2026-04-22）实测踩过一次：shell 继承值指向 qwen-plugin 路径，所有命令都要 override 才行。长期解法是 namespace 化（`MINIMAX_PLUGIN_DATA` / `GEMINI_PLUGIN_DATA` 等），当前没做。
 
 ---
 
