@@ -268,3 +268,49 @@ MiniMax 侧已发 v0.1.2（tag + GitHub Release + CHANGELOG 双同步，`node --
 - 我只需要在 MiniMax v0.1.3 发布后做一次二次 alignment（重点看：timing ndjson 的 schema 是否和 gemini 的兼容、SessionStart 清理阈值选择、upstream issue 是否得到 Mini-Agent 项目回应）
 - **P1 不要再推**——在 Mini-Agent 不吐 `served-model` 前，我方视角无可用数据源，这条差距属于上游问题，不应重复点名
 
+---
+
+## 10. v0.1.3 re-alignment pass（2026-04-22）
+
+MiniMax 侧 v0.1.3 已发版：tag `v0.1.3` / GitHub Release [v0.1.3 — timing telemetry + SessionStart cleanup + upstream absorbed](https://github.com/bbingz/minimax-plugin-cc/releases/tag/v0.1.3) / published 2026-04-22T04:49:01Z。对侧在 `PROGRESS.md §Re-alignment signal → gemini-plugin-cc` 列了 4 个对齐轴（§9 原 3 轴 + T14 review 发现的新 1 轴）。本节记录我方的二次对齐复核。
+
+### 10.1 本地验证证据
+
+- `git log v0.1.2..v0.1.3` = 14 commits（Task 0-12 + T14 + 2 个 T14 follow-up + 2 docs finalization）
+- `node --test plugins/minimax/scripts/**/*.test.mjs` → **137 pass / 0 fail / 0 cancelled**（v0.1.2 baseline 86 → +51 新增）
+- T14 hard gate：`doc/smoke/phase-6-T14.md` 10.4KB，**11/11 assertions PASS**，真机 Mini-Agent 0.1.0 / MiniMax-M2.7-highspeed / Coding Plan
+- 源码 diff vs v0.1.2：+1316 / −12 across 13 files
+
+### 10.2 四轴复核结果
+
+| 轴 | 对侧声明 | 我方复核 | 结论 |
+|---|---|---|---|
+| **1. ndjson schema 兼容** | 字段名镜像 gemini `timing.build()`；3 个同名不同义字段 + `invariantKind: "3term"` discriminator + `usage: []` 数组形状 | 逐字段比对 minimax `timing.mjs::TimingAccumulator.build()` vs 我方：19 字段名字节级一致；不可填者 `ttftMs/toolMs/retryMs/tokensPerSec/coldStartPhases = null`，`usage = []`；`invariantKind` 是超出 spec 的**加固** | ✅ **PASS**。MiniMax 的 `firstEventMs`/`streamMs`/`retryMs` 语义漂移已在 spec §4 compat callout 显式登记——跨插件聚合必须用 `totalMs`，不能简单累加 `streamMs` |
+| **2. SessionStart cleanup 阈值** | 默认 3d，`MINIMAX_STALE_JOB_THRESHOLD_MS` env 覆盖；4-branch sweep（terminal / non-terminal+dead / missing-meta / corrupt-meta+fresh-skip）；`process.kill(pid, 0)` ESRCH 探活 + mtime>3d 双条件 | `session-lifecycle-hook.mjs`：`DEFAULT_STALE_MS = 3 * 24 * 60 * 60 * 1000`；4 分支决策树完整实现 | ✅ **PASS**。`MINIMAX_` 前缀是好实践——避免和 kimi v0.2 的 `KIMI_JOB_TTL_DAYS`（7d 默认）冲突 |
+| **3. `/minimax:timing` 命令** | 三视图：history table（默认）/ `--aggregate`（percentiles）/ `--json`（raw）；额外 `--kind/--last/--since` filter；D7 composition rule（`--aggregate` 缺合法 `--kind` 直接 exit 2） | `commands/timing.md` + `minimax-companion.mjs`：所有视图 + 过滤器齐备；`VALID_TIMING_KINDS` 把 `adversarial-red` / `adversarial-blue` 作独立 kind（per D7 dual-record 契约） | ✅ **PASS**。把 adversarial 拆成两个 kind 是 spec D7 落地的干净形状 |
+| **4. NEW — `CLAUDE_PLUGIN_DATA` sibling-plugin env inheritance caveat** | T14 smoke 期间发现：shell 继承的 `CLAUDE_PLUGIN_DATA` 曾指向 qwen-plugin 路径，每条命令要 `export` override；属 sibling-generic 问题；请求 gemini baseline.md 收录 | 确认——这是 T14 review 里我提的 Finding 2 的对侧放大。随 plugin 数量增长，env inheritance 串扰只会更常见 | ✅ **UPTAKE**。已把警示写入 `docs/alignment/baseline.md §10` 作为设计原则 #8 |
+
+### 10.3 原 P0-P4 发现的终局状态
+
+| # | 原发现 | 终局 | 依据 |
+|---|---|---|---|
+| **P0** timing 完全缺席 | ✅ **CLOSED** | v0.1.3 shipped 3-term ndjson（`firstEventMs + streamMs + tailMs = totalMs`）+ TimingAccumulator + global history + `/minimax:timing`。不是 6 段——架构上 Mini-Agent 没 stream event，3 段是 honest ceiling |
+| **P1** 主力模型使用验证（A 卷）| ⏸️ **永久受限于上游** | 对侧 scope decision 2026-04-22：**不提 upstream issue**，改为内部吸收（PROGRESS.md §Upstream limitations accepted）。`served_model` / `usage` / per-line timestamps 都永远 `null`/`[]`。TimingAccumulator 的 8 个 reserved no-op 方法就位——上游将来改了可以直接 wire，不必重构 |
+| **P2** hook 文件体量偏小 | ✅ **CLOSED** | `session-lifecycle-hook.mjs` 从 30 行膨胀到 123 行；SessionEnd per-session + SessionStart 4-branch mtime sweep 都落地 |
+| **P3** `/minimax:timing` 缺失 | ✅ **CLOSED** | 命令 + 三视图 + filter + D7 composition rule 全齐 |
+| **P4** 内联测试风格 | — **N/A**（保留现状） | 非差距；v0.1.3 仍然用 `lib/*.test.mjs` 内联，风格一致 |
+
+**净结果**：P0/P2/P3 全部关闭；P1 作为**已知永久受限**从差距清单移除（不是未完成任务，是架构契约）；P4 本来就不是差距。
+
+### 10.4 我方产出的对侧可用输入
+
+- **Finding 1（test count drift）**：CHANGELOG 写 133，实际 135→137——对侧已 sync 到 137（commit `89afbd3`），显式标注 "Gemini Finding 1"。闭环完成，不再行动
+- **Finding 2（`CLAUDE_PLUGIN_DATA` inheritance）**：对侧请求我方 baseline.md 收录。已做，作为设计原则 #8
+- **Adversarial red/blue 列名缩写（commit `0abde6d`）**：对侧 self-caught 的 T14 follow-up（history table 列宽溢出），不是我的 finding，记录于此供下轮审计参考
+
+### 10.5 我方后续动作
+
+- **本轮对齐完全闭环**——P0/P2/P3 交付验收通过，P1 降级为架构契约不再点名，P4 从未视为差距
+- **下一轮 re-alignment trigger**：若 Mini-Agent 上游改了 log 格式开始吐 `served_model` 或 per-line timestamps，对侧可以从 no-op `onFirstToken`/`onResult` 等方法开始 wire，那时候再做 P1 解锁评估
+- **跨插件 timing schema 统一审查建议**：在 kimi v0.2 P1（timing）落地后做一次三方 `timings.ndjson` 字节级比对——届时 minimax 的 `invariantKind: "3term"` 是 discriminator 模板，kimi 可以选 `"6term"` 或 `"3term"` 看上游能给什么
+
