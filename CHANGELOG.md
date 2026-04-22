@@ -1,5 +1,9 @@
 # Changelog
 
+## docs(alignment/baseline) — 2026-04-22
+
+Apply kimi §8.3 feedback to `docs/alignment/baseline.md`: (1) §6.3 主力模型使用验证 adds "CLI must emit per-model usage in result event" prerequisite caveat — sibling CLIs (kimi-cli 1.x, Mini-Agent 0.1.0) may lack this data source, making A-roll detection architecturally out-of-reach rather than a plugin gap; (2) §10 adds design principle #7 on CHANGELOG authority ordering (repo-root CHANGELOG + plugin.json are authoritative; plugin sub-CHANGELOG may drift — lesson from the 2026-04-21 "Phase 1 in progress" misread); (3) §11 adds a future-work bullet pointing at kimi's thin-adapter / thick-pipeline shape (`scripts/lib/review.mjs` + `runReviewPipeline`) as a reference when review is extracted from `gemini.mjs`.
+
 ## docs(alignment/kimi) — 2026-04-22
 
 Record kimi alignment loop-close in `docs/alignment/kimi.md` §8. Kimi merged `kimi-plugin-cc@8e18587` (10 files, +617/−46): applied P0 (dead timing read path removed) + P3 (command contract normalization) + §5.2/§5.3/§5.5 clarifications (auth boundary, Phase-5 timing gate, prompts.mjs rationale); deferred P1 (blocked on kimi-cli 1.37 per-model re-probe) + P2 (pairs with v0.2 timing path); intentionally skipped `gfg-` foreground-job prefix. Also captured two factual corrections to our 2026-04-21 report (§2 首行噪声截取 N/A for kimi — gemini-CLI-only quirk; "Phase 1 in progress" was stale sub-CHANGELOG drift) and logged three inputs for next baseline.md iteration.
