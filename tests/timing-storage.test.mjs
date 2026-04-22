@@ -16,8 +16,19 @@ import {
   resolveTimingHistoryFile,
 } from "../plugins/gemini/scripts/lib/state.mjs";
 
+function makeHistoryRecord(jobId, timing = { totalMs: 100 }) {
+  return {
+    ts: new Date().toISOString(),
+    jobId,
+    kind: "task",
+    workspace: "/tmp/demo",
+    sessionId: null,
+    timing,
+  };
+}
+
 test("appendTimingHistory writes one line and readTimingHistory returns it", () => {
-  const record = { jobId: "gt-abc", kind: "task", timing: { totalMs: 100 } };
+  const record = makeHistoryRecord("gt-abc");
   const ok = appendTimingHistory(record);
   assert.equal(ok, true);
 
@@ -28,8 +39,8 @@ test("appendTimingHistory writes one line and readTimingHistory returns it", () 
 });
 
 test("two appends produce two lines", () => {
-  appendTimingHistory({ jobId: "gt-a" });
-  appendTimingHistory({ jobId: "gt-b" });
+  appendTimingHistory(makeHistoryRecord("gt-a"));
+  appendTimingHistory(makeHistoryRecord("gt-b"));
   const rows = readTimingHistory();
   // previous test already wrote 1 record; expect >=3
   assert.ok(rows.length >= 3);
@@ -39,7 +50,7 @@ test("append after a partial-line file prepends newline to recover", () => {
   const file = resolveTimingHistoryFile();
   // Force-write a partial line (no trailing \n)
   fs.writeFileSync(file, '{"jobId":"gt-part');
-  appendTimingHistory({ jobId: "gt-after" });
+  appendTimingHistory(makeHistoryRecord("gt-after"));
 
   const rows = readTimingHistory();
   // The partial line is corrupt and skipped; new line is recoverable
@@ -66,7 +77,7 @@ test("file exceeding 10MB is trimmed to newest 50%", () => {
   assert.ok(beforeSize > 10 * 1024 * 1024);
 
   // This append triggers trim
-  appendTimingHistory({ jobId: "gt-trigger-trim" });
+  appendTimingHistory(makeHistoryRecord("gt-trigger-trim"));
 
   const afterSize = fs.statSync(file).size;
   assert.ok(afterSize < beforeSize, `expected trim, got ${afterSize} vs ${beforeSize}`);
@@ -104,7 +115,16 @@ test("two concurrent appendTimingHistory calls both land", async () => {
   const script = `
     import { appendTimingHistory } from "${path.resolve("plugins/gemini/scripts/lib/state.mjs")}";
     process.env.CLAUDE_PLUGIN_DATA = "${tmpRoot}";
-    for (let i = 0; i < 20; i++) appendTimingHistory({ jobId: "gt-p" + process.pid + "-" + i });
+    for (let i = 0; i < 20; i++) {
+      appendTimingHistory({
+        ts: new Date().toISOString(),
+        jobId: "gt-p" + process.pid + "-" + i,
+        kind: "task",
+        workspace: "/tmp/demo",
+        sessionId: null,
+        timing: { totalMs: 100 }
+      });
+    }
   `;
   await Promise.all([
     new Promise((r) => {
@@ -119,4 +139,18 @@ test("two concurrent appendTimingHistory calls both land", async () => {
 
   const rows = readTimingHistory();
   assert.equal(rows.length, 40, `expected 40 rows, got ${rows.length}`);
+});
+
+test("appendTimingHistory rejects records whose timing payload violates polycli contract", () => {
+  const before = readTimingHistory().length;
+  const ok = appendTimingHistory({
+    ...makeHistoryRecord("gt-invalid"),
+    timing: {
+      totalMs: -1,
+    },
+  });
+
+  assert.equal(ok, false);
+  const after = readTimingHistory().length;
+  assert.equal(after, before);
 });
